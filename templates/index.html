@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>FrikShun Creator OS</title>
+    <style>
+      body {
+        margin: 0;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #101114;
+        color: #f4f1ea;
+      }
+
+      main {
+        max-width: 980px;
+        margin: 0 auto;
+        padding: 48px 20px;
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: 32px;
+        letter-spacing: 0;
+      }
+
+      p {
+        color: #c8c1b6;
+      }
+
+      .drafts {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 12px;
+        margin-top: 28px;
+      }
+
+      article {
+        border: 1px solid #343841;
+        border-radius: 8px;
+        padding: 16px;
+        background: #181a1f;
+      }
+
+      h2 {
+        margin: 0 0 10px;
+        font-size: 16px;
+        text-transform: uppercase;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>FrikShun Creator OS</h1>
+      <p>Local-first content transformation and publishing engine for Chloe artifacts.</p>
+
+      <section class="drafts" aria-label="Platform draft placeholders">
+        {% for draft in drafts %}
+          <article>
+            <h2>{{ draft.platform }}</h2>
+            <p>{{ draft.caption }}</p>
+          </article>
+        {% endfor %}
+      </section>
+    </main>
+  </body>
+</html>
