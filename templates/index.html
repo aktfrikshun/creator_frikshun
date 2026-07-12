@@ -211,6 +211,8 @@
         <form action="{{ url_for('creator.cleanup_unpublished_drafts') }}" method="post">
           <button type="submit">Archive Unpublished Drafts</button>
         </form>
+
+        <a class="button" href="{{ url_for('creator.metrics_dashboard') }}">Review Metrics</a>
       </div>
 
       {% for category, message in get_flashed_messages(with_categories=true) %}

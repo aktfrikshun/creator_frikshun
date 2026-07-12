@@ -4,7 +4,7 @@ import unittest
 
 from frikshun_creator import create_app
 from frikshun_creator.db import get_session
-from frikshun_creator.models import Artifact, PostDraft, PostPublication
+from frikshun_creator.models import Artifact, PostDraft, PostMetricSnapshot, PostPublication
 
 
 class RoutesTest(unittest.TestCase):
@@ -204,6 +204,52 @@ class RoutesTest(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         self.assertIn(b"Archived 13 unpublished drafts.", response.data)
         self.assertNotIn(b"Second Cleanup Signal", response.data)
+
+    def test_metrics_dashboard_displays_published_post_snapshot(self):
+        with self.app.app_context():
+            session = get_session()
+            artifact = Artifact(title="Metric Window")
+            session.add(artifact)
+            session.flush()
+            draft = PostDraft(
+                artifact_id=artifact.id,
+                platform="facebook",
+                caption="A post with metrics.",
+                status="published",
+            )
+            session.add(draft)
+            session.flush()
+            publication = PostPublication(
+                post_draft_id=draft.id,
+                platform="facebook",
+                status="published",
+                external_post_id="facebook-post-2",
+                external_url="https://facebook.test/post",
+            )
+            session.add(publication)
+            session.flush()
+            session.add(
+                PostMetricSnapshot(
+                    post_publication_id=publication.id,
+                    platform="facebook",
+                    external_post_id="facebook-post-2",
+                    views=100,
+                    likes=12,
+                    comments=3,
+                    shares=2,
+                    clicks=6,
+                    reach=90,
+                )
+            )
+            session.commit()
+
+        response = self.client.get("/metrics")
+
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"Post Metrics", response.data)
+        self.assertIn(b"Metric Window", response.data)
+        self.assertIn(b"facebook-post-2", response.data)
+        self.assertIn(b"100", response.data)
 
 
 if __name__ == "__main__":

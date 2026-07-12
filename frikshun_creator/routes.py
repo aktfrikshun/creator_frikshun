@@ -3,13 +3,14 @@ from datetime import datetime, timezone
 from flask import Blueprint, current_app, flash, redirect, render_template, request, url_for
 
 from .db import get_session
-from .models import Artifact, CanonEntry, PlatformAccount, PostDraft, PostPublication
+from .models import Artifact, CanonEntry, PlatformAccount, PostDraft, PostInteraction, PostPublication
 from .publishers import FacebookAdapter
 from .services.canon_importer import CanonImporter
 from .services.draft_generator import ArtifactDraftGenerator, PLATFORMS
 from .services.generation_context import load_generation_context
 from .services.media_analyzer import MediaAnalyzer
 from .services.metadata_generator import ArtifactMetadataGenerator
+from .services.post_metrics import PostMetricsPoller, latest_snapshot_by_publication
 from .services.post_preview import apply_review_form, platform_summary
 from .services.sample_artifact_importer import SampleArtifactImporter
 from .services.social_post_importer import SocialPostImporter
@@ -17,6 +18,16 @@ from .services.text import split_tags
 from .services.uploads import archive_media_filename, next_fragment_code, save_artifact_file
 
 bp = Blueprint("creator", __name__)
+
+
+def facebook_adapter():
+    return FacebookAdapter(
+        page_id=current_app.config.get("FACEBOOK_PAGE_ID"),
+        access_token=current_app.config.get("FACEBOOK_PAGE_ACCESS_TOKEN"),
+        graph_version=current_app.config.get("FACEBOOK_GRAPH_VERSION"),
+        dry_run=current_app.config.get("FACEBOOK_DRY_RUN"),
+        target_type=current_app.config.get("FACEBOOK_TARGET_TYPE"),
+    )
 
 
 @bp.get("/")
@@ -159,8 +170,48 @@ def review_draft(draft_id):
         "review_draft.html",
         draft=draft,
         preview=platform_summary(draft),
-        facebook_adapter=FacebookAdapter(),
+        facebook_adapter=facebook_adapter(),
     )
+
+
+@bp.get("/metrics")
+def metrics_dashboard():
+    session = get_session()
+    publications = (
+        session.query(PostPublication)
+        .filter(PostPublication.status == "published")
+        .order_by(PostPublication.created_at.desc())
+        .limit(50)
+        .all()
+    )
+    interactions = (
+        session.query(PostInteraction)
+        .order_by(PostInteraction.fetched_at.desc())
+        .limit(50)
+        .all()
+    )
+    return render_template(
+        "metrics.html",
+        publications=publications,
+        latest_snapshots=latest_snapshot_by_publication(publications),
+        interactions=interactions,
+    )
+
+
+@bp.post("/metrics/poll")
+def poll_metrics():
+    session = get_session()
+    result = PostMetricsPoller(session, adapters={"facebook": facebook_adapter()}).run()
+    message = (
+        f"Metrics poll complete: {result.snapshots_created} snapshots, "
+        f"{result.interactions_created} new interactions, "
+        f"{result.interactions_updated} updated interactions, "
+        f"{result.skipped} skipped."
+    )
+    flash(message, "success" if not result.errors else "error")
+    for error in result.errors[:3]:
+        flash(error, "error")
+    return redirect(url_for("creator.metrics_dashboard"))
 
 
 @bp.post("/drafts/<int:draft_id>/save")
@@ -217,7 +268,7 @@ def publish_facebook(draft_id):
 
     apply_review_form(draft, request.form)
     draft.updated_at = datetime.now(timezone.utc)
-    result = FacebookAdapter().publish(draft)
+    result = facebook_adapter().publish(draft)
     draft.status = result.status
     if result.success:
         draft.approved_at = datetime.now(timezone.utc)

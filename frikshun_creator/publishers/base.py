@@ -1,4 +1,6 @@
 from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Optional
 
 
 @dataclass
@@ -9,6 +11,34 @@ class PublishResult:
     external_url: str = ""
     error_message: str = ""
     raw_response: dict = field(default_factory=dict)
+
+
+@dataclass
+class PostMetrics:
+    platform: str
+    external_post_id: str
+    external_url: str = ""
+    views: int = 0
+    likes: int = 0
+    comments: int = 0
+    shares: int = 0
+    saves: int = 0
+    clicks: int = 0
+    reach: int = 0
+    raw_metrics: dict = field(default_factory=dict)
+
+
+@dataclass
+class PostInteractionData:
+    platform: str
+    interaction_type: str
+    external_id: str
+    external_post_id: str
+    author_name: str = ""
+    author_platform_id: str = ""
+    body: str = ""
+    received_at: Optional[datetime] = None
+    raw_payload: dict = field(default_factory=dict)
 
 
 class PublisherAdapter:
@@ -36,3 +66,9 @@ class PublisherAdapter:
 
     def publish(self, post_draft):
         raise NotImplementedError
+
+    def fetch_post_metrics(self, post_publication):
+        raise NotImplementedError
+
+    def fetch_post_interactions(self, post_publication):
+        return []

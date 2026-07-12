@@ -46,6 +46,8 @@ The local interface can now:
 - Archive individual drafts or archive all unpublished drafts.
 - Publish a Facebook draft through `FacebookAdapter`.
 - Record publication attempts.
+- Poll live post metrics for connected platforms.
+- Review views, reach, likes, comments, shares, clicks, and incoming comments/messages.
 
 Facebook publishing defaults to dry-run mode so the full workflow can be tested without sending anything to Meta.
 
@@ -112,6 +114,24 @@ FACEBOOK_PAGE_ACCESS_TOKEN=your_page_access_token
 The Page access token should come from a Meta app connected to a Facebook Page you administer. The app/token needs Page publishing permissions such as `pages_manage_posts`; Meta may require additional permissions or app review depending on the account/app state.
 
 For personal profile posting, use the generated Facebook draft as manual copy/paste text. The adapter intentionally refuses automated `profile` targets.
+
+## Post Metrics Polling
+
+Poll published post metrics from the UI:
+
+```text
+/metrics
+```
+
+Or from the command line:
+
+```sh
+flask --app app poll-post-metrics
+```
+
+The metrics layer is platform-neutral, but Facebook is the first live adapter. Each poll stores a new snapshot in `creator_post_metric_snapshots` and imports comments into `creator_post_interactions` with `reply_status=pending_review`.
+
+The interaction queue is intentionally review-first. It is the staging area for the planned scheduled process that will fetch new comments/messages and prepare Chloe-voice replies before anything is sent.
 
 ## Boundary
 

@@ -106,6 +106,59 @@ class PostPublication(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     post_draft: Mapped[PostDraft] = relationship(back_populates="publications")
+    metric_snapshots: Mapped[List["PostMetricSnapshot"]] = relationship(
+        back_populates="post_publication", cascade="all, delete-orphan"
+    )
+    interactions: Mapped[List["PostInteraction"]] = relationship(
+        back_populates="post_publication", cascade="all, delete-orphan"
+    )
+
+
+class PostMetricSnapshot(Base):
+    __tablename__ = "creator_post_metric_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    post_publication_id: Mapped[int] = mapped_column(
+        ForeignKey("creator_post_publications.id"), nullable=False
+    )
+    platform: Mapped[str] = mapped_column(String(80), nullable=False)
+    external_post_id: Mapped[str] = mapped_column(String(240), default="")
+    external_url: Mapped[str] = mapped_column(String(500), default="")
+    views: Mapped[int] = mapped_column(Integer, default=0)
+    likes: Mapped[int] = mapped_column(Integer, default=0)
+    comments: Mapped[int] = mapped_column(Integer, default=0)
+    shares: Mapped[int] = mapped_column(Integer, default=0)
+    saves: Mapped[int] = mapped_column(Integer, default=0)
+    clicks: Mapped[int] = mapped_column(Integer, default=0)
+    reach: Mapped[int] = mapped_column(Integer, default=0)
+    raw_metrics: Mapped[dict] = mapped_column(JSON, default=dict)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    post_publication: Mapped[PostPublication] = relationship(back_populates="metric_snapshots")
+
+
+class PostInteraction(Base):
+    __tablename__ = "creator_post_interactions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    post_publication_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("creator_post_publications.id"), nullable=True
+    )
+    platform: Mapped[str] = mapped_column(String(80), nullable=False)
+    interaction_type: Mapped[str] = mapped_column(String(80), default="comment")
+    external_id: Mapped[str] = mapped_column(String(240), default="")
+    external_post_id: Mapped[str] = mapped_column(String(240), default="")
+    author_name: Mapped[str] = mapped_column(String(240), default="")
+    author_platform_id: Mapped[str] = mapped_column(String(240), default="")
+    body: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(80), default="new")
+    reply_status: Mapped[str] = mapped_column(String(80), default="pending_review")
+    suggested_reply: Mapped[str] = mapped_column(Text, default="")
+    raw_payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    received_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    post_publication: Mapped[Optional[PostPublication]] = relationship(back_populates="interactions")
 
 
 class Campaign(Base):

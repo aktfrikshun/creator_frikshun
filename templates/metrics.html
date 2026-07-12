@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Post Metrics</title>
+    <style>
+      body {
+        margin: 0;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #101114;
+        color: #f4f1ea;
+      }
+
+      main {
+        max-width: 1180px;
+        margin: 0 auto;
+        padding: 32px 20px 48px;
+      }
+
+      a {
+        color: #f4f1ea;
+      }
+
+      h1 {
+        margin: 14px 0 8px;
+        font-size: 34px;
+        letter-spacing: 0;
+      }
+
+      h2 {
+        margin: 0 0 14px;
+        font-size: 20px;
+      }
+
+      p,
+      small,
+      th,
+      td {
+        color: #c8c1b6;
+      }
+
+      .topbar {
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+        align-items: end;
+        flex-wrap: wrap;
+      }
+
+      form {
+        margin: 0;
+      }
+
+      button,
+      .button {
+        border: 0;
+        border-radius: 8px;
+        padding: 10px 13px;
+        background: #d34d56;
+        color: #fff;
+        font: inherit;
+        font-weight: 800;
+        text-decoration: none;
+        cursor: pointer;
+      }
+
+      .panel {
+        margin-top: 24px;
+        border: 1px solid #343841;
+        border-radius: 8px;
+        background: #181a1f;
+        padding: 18px;
+        overflow-x: auto;
+      }
+
+      .flash {
+        border-radius: 8px;
+        padding: 10px 12px;
+        margin: 16px 0 0;
+        background: #223128;
+        color: #d7f7df;
+      }
+
+      .flash.error {
+        background: #3a2225;
+        color: #ffd5d9;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        min-width: 860px;
+      }
+
+      th,
+      td {
+        border-bottom: 1px solid #30343c;
+        padding: 10px 8px;
+        text-align: left;
+        vertical-align: top;
+      }
+
+      th {
+        color: #f4f1ea;
+        font-size: 12px;
+        text-transform: uppercase;
+      }
+
+      .metric {
+        color: #f4f1ea;
+        font-weight: 800;
+      }
+
+      .status {
+        display: inline-block;
+        border-radius: 999px;
+        padding: 4px 8px;
+        background: #282c34;
+        color: #f4f1ea;
+        font-size: 12px;
+        white-space: nowrap;
+      }
+
+      .body {
+        max-width: 380px;
+        white-space: pre-wrap;
+      }
+
+      .empty {
+        color: #9ca3af;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <a href="{{ url_for('creator.index') }}">Back to Creator OS</a>
+      <div class="topbar">
+        <div>
+          <h1>Post Metrics</h1>
+          <p>Published post snapshots and incoming interaction review.</p>
+        </div>
+        <form action="{{ url_for('creator.poll_metrics') }}" method="post">
+          <button type="submit">Poll Live Metrics</button>
+        </form>
+      </div>
+
+      {% for category, message in get_flashed_messages(with_categories=true) %}
+        <div class="flash {{ category }}">{{ message }}</div>
+      {% endfor %}
+
+      <section class="panel" aria-label="Published post metrics">
+        <h2>Published Posts</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Post</th>
+              <th>Platform</th>
+              <th>Views</th>
+              <th>Reach</th>
+              <th>Likes</th>
+              <th>Comments</th>
+              <th>Shares</th>
+              <th>Clicks</th>
+              <th>Fetched</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for publication in publications %}
+              {% set snapshot = latest_snapshots[publication.id] %}
+              <tr>
+                <td>
+                  <strong>{{ publication.post_draft.artifact.title }}</strong><br>
+                  <small>{{ publication.external_post_id }}</small>
+                  {% if publication.external_url %}
+                    <br><a href="{{ publication.external_url }}">Open post</a>
+                  {% endif %}
+                </td>
+                <td><span class="status">{{ publication.platform }}</span></td>
+                <td class="metric">{{ snapshot.views if snapshot else 0 }}</td>
+                <td class="metric">{{ snapshot.reach if snapshot else 0 }}</td>
+                <td class="metric">{{ snapshot.likes if snapshot else 0 }}</td>
+                <td class="metric">{{ snapshot.comments if snapshot else 0 }}</td>
+                <td class="metric">{{ snapshot.shares if snapshot else 0 }}</td>
+                <td class="metric">{{ snapshot.clicks if snapshot else 0 }}</td>
+                <td>
+                  {% if snapshot %}
+                    {{ snapshot.fetched_at.strftime("%Y-%m-%d %H:%M") }}
+                  {% else %}
+                    <span class="empty">Not polled yet</span>
+                  {% endif %}
+                </td>
+              </tr>
+            {% else %}
+              <tr>
+                <td colspan="9" class="empty">No published posts have been recorded yet.</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </section>
+
+      <section class="panel" aria-label="Incoming interactions">
+        <h2>Incoming Comments And Messages</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Source</th>
+              <th>Author</th>
+              <th>Body</th>
+              <th>Reply Status</th>
+              <th>Received</th>
+              <th>Fetched</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for interaction in interactions %}
+              <tr>
+                <td>
+                  <span class="status">{{ interaction.platform }}</span><br>
+                  <small>{{ interaction.interaction_type }} {{ interaction.external_id }}</small>
+                </td>
+                <td>{{ interaction.author_name or "Unknown" }}</td>
+                <td class="body">{{ interaction.body }}</td>
+                <td><span class="status">{{ interaction.reply_status }}</span></td>
+                <td>
+                  {% if interaction.received_at %}
+                    {{ interaction.received_at.strftime("%Y-%m-%d %H:%M") }}
+                  {% else %}
+                    <span class="empty">Unknown</span>
+                  {% endif %}
+                </td>
+                <td>{{ interaction.fetched_at.strftime("%Y-%m-%d %H:%M") }}</td>
+              </tr>
+            {% else %}
+              <tr>
+                <td colspan="6" class="empty">No comments or messages have been fetched yet.</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </section>
+    </main>
+  </body>
+</html>
