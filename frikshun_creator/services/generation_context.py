@@ -22,6 +22,23 @@ class GenerationContext:
         return "\n".join(bodies)
 
     @property
+    def visual_excerpt(self):
+        bodies = []
+        visual_entries = [
+            entry for entry in self.canon_entries if entry.canon_category == "visual/persona"
+        ]
+        archive_visual_entries = [
+            entry
+            for entry in self.canon_entries
+            if entry.canon_category.startswith("visuals/")
+            or entry.canon_category == "visuals"
+        ]
+        for entry in (visual_entries + archive_visual_entries)[:6]:
+            if entry.body:
+                bodies.append(f"{entry.title}: {entry.body[:700]}")
+        return "\n".join(bodies)
+
+    @property
     def recent_post_excerpt(self):
         captions = []
         for draft in self.recent_posts[:8]:
@@ -48,6 +65,14 @@ class GenerationContext:
                 return True
         return False
 
+    @property
+    def has_visual_chloe_guidance(self):
+        for entry in self.canon_entries:
+            category = entry.canon_category or ""
+            if category == "visual/persona" or category.startswith("visuals/") or category == "visuals":
+                return True
+        return False
+
 
 def load_generation_context(session):
     voice_entries = (
@@ -58,16 +83,37 @@ def load_generation_context(session):
         .order_by(CanonEntry.id.desc())
         .all()
     )
+    visual_entries = (
+        session.query(CanonEntry)
+        .filter(
+            CanonEntry.canon_category.in_(
+                [
+                    "visual/persona",
+                    "visuals",
+                    "visuals/photo_archive",
+                    "visuals/reference_boards/chloe",
+                ]
+            )
+            | CanonEntry.canon_category.like("visuals/%")
+        )
+        .filter(CanonEntry.canonical_status.in_(["approved", "reference"]))
+        .filter(CanonEntry.usable_in_generation.is_(True))
+        .order_by(CanonEntry.id.desc())
+        .limit(12)
+        .all()
+    )
     other_entries = (
         session.query(CanonEntry)
-        .filter(CanonEntry.canon_category != "voice/persona")
+        .filter(CanonEntry.canon_category.not_in(["voice/persona", "visual/persona"]))
+        .filter(~CanonEntry.canon_category.like("visuals/%"))
+        .filter(CanonEntry.canon_category != "visuals")
         .filter(CanonEntry.canonical_status.in_(["approved", "reference"]))
         .filter(CanonEntry.usable_in_generation.is_(True))
         .order_by(CanonEntry.id.desc())
         .limit(20)
         .all()
     )
-    canon_entries = voice_entries + other_entries
+    canon_entries = voice_entries + visual_entries + other_entries
     recent_posts = (
         session.query(PostDraft)
         .filter(PostDraft.status.in_(["approved", "published"]))

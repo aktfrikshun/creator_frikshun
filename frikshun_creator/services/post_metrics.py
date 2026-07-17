@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from ..models import PostInteraction, PostMetricSnapshot, PostPublication
-from ..publishers import FacebookAdapter
+from ..publishers import FacebookAdapter, InstagramAdapter, XAdapter, FanvueAdapter
 
 
 @dataclass
@@ -18,7 +18,12 @@ class PollMetricsResult:
 class PostMetricsPoller:
     def __init__(self, session, adapters=None):
         self.session = session
-        self.adapters = adapters or {"facebook": FacebookAdapter()}
+        self.adapters = adapters or {
+            "facebook": FacebookAdapter(),
+            "instagram": InstagramAdapter(),
+            "x": XAdapter(),
+            "fanvue": FanvueAdapter(),
+        }
 
     def run(self, platform=None):
         result = PollMetricsResult()
@@ -33,6 +38,9 @@ class PostMetricsPoller:
 
         for publication in query.all():
             result.scanned += 1
+            if publication.external_post_id.startswith("dry-run-"):
+                result.skipped += 1
+                continue
             adapter = self.adapters.get(publication.platform)
             if not adapter:
                 result.skipped += 1

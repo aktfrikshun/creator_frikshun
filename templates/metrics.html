@@ -161,6 +161,7 @@
               <th>Likes</th>
               <th>Comments</th>
               <th>Shares</th>
+              <th>Saves</th>
               <th>Clicks</th>
               <th>Fetched</th>
             </tr>
@@ -182,6 +183,7 @@
                 <td class="metric">{{ snapshot.likes if snapshot else 0 }}</td>
                 <td class="metric">{{ snapshot.comments if snapshot else 0 }}</td>
                 <td class="metric">{{ snapshot.shares if snapshot else 0 }}</td>
+                <td class="metric">{{ snapshot.saves if snapshot else 0 }}</td>
                 <td class="metric">{{ snapshot.clicks if snapshot else 0 }}</td>
                 <td>
                   {% if snapshot %}
@@ -193,7 +195,7 @@
               </tr>
             {% else %}
               <tr>
-                <td colspan="9" class="empty">No published posts have been recorded yet.</td>
+                <td colspan="10" class="empty">No published posts have been recorded yet.</td>
               </tr>
             {% endfor %}
           </tbody>

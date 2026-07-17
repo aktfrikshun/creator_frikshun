@@ -87,6 +87,113 @@ class RoutesTest(unittest.TestCase):
             updated_draft = session.get(PostDraft, facebook.id)
             self.assertEqual("Edited Facebook copy for publishing.", updated_draft.caption)
 
+    def test_instagram_dry_run_publishes_public_jpeg_draft(self):
+        with self.app.app_context():
+            session = get_session()
+            artifact = Artifact(
+                title="Instagram Signal",
+                media_path="/local/instagram-signal.jpg",
+                media_content_type="image/jpeg",
+                generated_metadata={
+                    "public_media_url": "https://cdn.example.test/instagram-signal.jpg"
+                },
+            )
+            session.add(artifact)
+            session.flush()
+            draft = PostDraft(
+                artifact_id=artifact.id,
+                platform="instagram",
+                caption="An Instagram fragment.",
+                hashtags=["ChloKat"],
+            )
+            session.add(draft)
+            session.commit()
+            draft_id = draft.id
+
+        response = self.client.post(
+            f"/drafts/{draft_id}/publish/instagram",
+            data={
+                "caption": "Edited Instagram fragment.",
+                "call_to_action": "Follow the signal.",
+                "hashtags": "ChloKat, RecoveredMemory",
+            },
+            follow_redirects=True,
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"Instagram published.", response.data)
+        with self.app.app_context():
+            session = get_session()
+            publication = session.query(PostPublication).filter_by(platform="instagram").one()
+            self.assertTrue(publication.external_post_id.startswith("dry-run-instagram-"))
+
+    def test_x_dry_run_publishes_image_draft_from_review_page(self):
+        image_path = f"{self.uploads.name}/x-signal.jpg"
+        with open(image_path, "wb") as image:
+            image.write(b"jpeg")
+        with self.app.app_context():
+            session = get_session()
+            artifact = Artifact(
+                title="X Signal", media_path=image_path, media_content_type="image/jpeg"
+            )
+            session.add(artifact)
+            session.flush()
+            draft = PostDraft(
+                artifact_id=artifact.id,
+                platform="x",
+                caption="Identity leaves an echo. Which echo would you follow?",
+                hashtags=["ChloKat"],
+            )
+            session.add(draft)
+            session.commit()
+            draft_id = draft.id
+
+        review = self.client.get(f"/drafts/{draft_id}")
+        self.assertIn(b"Dry Run Publish", review.data)
+        response = self.client.post(
+            f"/drafts/{draft_id}/publish/x",
+            data={
+                "caption": "Identity leaves an echo. Which echo would you follow?",
+                "call_to_action": "",
+                "hashtags": "ChloKat",
+            },
+            follow_redirects=True,
+        )
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"X published.", response.data)
+        with self.app.app_context():
+            publication = get_session().query(PostPublication).filter_by(platform="x").one()
+            self.assertTrue(publication.external_post_id.startswith("dry-run-x-"))
+
+    def test_fanvue_dry_run_publishes_separate_image_from_review_page(self):
+        image_path = f"{self.uploads.name}/fanvue-signal.jpg"
+        with open(image_path, "wb") as image:
+            image.write(b"jpeg")
+        with self.app.app_context():
+            session = get_session()
+            artifact = Artifact(title="FanVue Signal", media_path=image_path,
+                                media_content_type="image/jpeg",
+                                generated_metadata={"fanvue_media_path": image_path})
+            session.add(artifact)
+            session.flush()
+            draft = PostDraft(artifact_id=artifact.id, platform="fanvue",
+                              caption="A private echo. Which memory comes closer?",
+                              hashtags=["ChloKat"])
+            session.add(draft)
+            session.commit()
+            draft_id = draft.id
+        response = self.client.post(
+            f"/drafts/{draft_id}/publish/fanvue",
+            data={"caption": "A private echo. Which memory comes closer?",
+                  "call_to_action": "", "hashtags": "ChloKat"},
+            follow_redirects=True,
+        )
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"FanVue published.", response.data)
+        with self.app.app_context():
+            publication = get_session().query(PostPublication).filter_by(platform="fanvue").one()
+            self.assertTrue(publication.external_post_id.startswith("dry-run-fanvue-"))
+
     def test_upload_with_blank_metadata_generates_artifact_defaults(self):
         response = self.client.post(
             "/artifacts",

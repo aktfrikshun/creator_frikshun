@@ -102,6 +102,30 @@ class PostMetricsPollerTest(unittest.TestCase):
             self.assertEqual(2, session.query(PostMetricSnapshot).count())
             self.assertEqual(1, session.query(PostInteraction).count())
 
+    def test_poller_skips_recorded_dry_run_publications(self):
+        with self.app.app_context():
+            session = get_session()
+            artifact = Artifact(title="Dry Signal")
+            draft = PostDraft(artifact=artifact, platform="facebook", caption="Dry copy.")
+            session.add(draft)
+            session.flush()
+            session.add(
+                PostPublication(
+                    post_draft_id=draft.id,
+                    platform="facebook",
+                    status="published",
+                    external_post_id="dry-run-facebook-example",
+                )
+            )
+            session.commit()
+
+            result = PostMetricsPoller(
+                session, adapters={"facebook": FakeMetricsAdapter()}
+            ).run()
+
+            self.assertEqual(1, result.skipped)
+            self.assertEqual(0, result.snapshots_created)
+
 
 if __name__ == "__main__":
     unittest.main()

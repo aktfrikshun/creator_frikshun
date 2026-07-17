@@ -226,6 +226,18 @@
                 <button type="submit" formaction="{{ url_for('creator.publish_facebook', draft_id=draft.id) }}">
                   {% if facebook_adapter.dry_run %}Dry Run Publish{% else %}Publish to Facebook{% endif %}
                 </button>
+              {% elif draft.platform == "instagram" %}
+                <button type="submit" formaction="{{ url_for('creator.publish_instagram', draft_id=draft.id) }}">
+                  {% if instagram_adapter.dry_run %}Dry Run Publish{% else %}Publish to Instagram{% endif %}
+                </button>
+              {% elif draft.platform == "x" %}
+                <button type="submit" formaction="{{ url_for('creator.publish_x', draft_id=draft.id) }}">
+                  {% if x_adapter.dry_run %}Dry Run Publish{% else %}Publish to X{% endif %}
+                </button>
+              {% elif draft.platform == "fanvue" %}
+                <button type="submit" formaction="{{ url_for('creator.publish_fanvue', draft_id=draft.id) }}">
+                  {% if fanvue_adapter.dry_run %}Dry Run Publish{% else %}Publish to FanVue{% endif %}
+                </button>
               {% else %}
                 <button type="submit" formaction="{{ url_for('creator.save_draft', draft_id=draft.id) }}" class="secondary">
                   Save for Manual Publish

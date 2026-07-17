@@ -115,6 +115,80 @@ The Page access token should come from a Meta app connected to a Facebook Page y
 
 For personal profile posting, use the generated Facebook draft as manual copy/paste text. The adapter intentionally refuses automated `profile` targets.
 
+Generate one daily recovered fragment package and publish it across Facebook, Instagram, X, and FanVue in a single command:
+
+```sh
+flask --app app run-daily-fragment-autopilot
+```
+
+This command generates the canonical public caption, X-native caption, FanVue caption, public image, and FanVue companion image automatically, then publishes them through the same run-based workflow used by the manual publisher.
+
+You can run it multiple times on the same day. Each invocation gets a unique run id by default, so it does not block later scheduled runs or later manual runs on the same local date.
+
+If you want to retry the same logical run and skip already-published platforms, pass an explicit run id:
+
+```sh
+flask --app app run-daily-fragment-autopilot --run-id friday-evening-retry
+```
+
+Use this command for the normal scheduled autopilot path. Keep `publish-daily-fragment` for cases where you already have specific text or images that need custom attention.
+
+Publish one recovered fragment and image to both Facebook and Instagram for the current local day:
+
+```sh
+flask --app app publish-daily-fragment \
+  --title "Recovered Fragment 014" \
+  --image /absolute/path/to/artwork.png \
+  --body "Post text"
+```
+
+The command converts the artwork to JPEG, uploads it privately to S3, gives Instagram a short-lived signed URL, and records independent Facebook and Instagram publications. It refuses dry-run mode by default.
+
+Use `--local-date` only when you want the generated copy and filenames to reflect a different local date. Use `--run-id` only when you want to retry the same logical run and preserve skip/retry behavior across platforms:
+
+```sh
+flask --app app publish-daily-fragment \
+  --local-date 2026-07-17 \
+  --run-id friday-evening-retry \
+  --title "Recovered Fragment 014" \
+  --image /absolute/path/to/artwork.png \
+  --fanvue-image /absolute/path/to/fanvue-artwork.png \
+  --body "Canonical post text" \
+  --x-body "Compact X post?" \
+  --fanvue-body "Closer FanVue post?"
+```
+
+Use `flask --app app check-daily-fragment-readiness` first to verify that OpenAI, S3, Facebook, Instagram, X, and FanVue are all ready for a live on-demand run.
+
+## Instagram Publishing Setup
+
+The Instagram adapter publishes single-image feed posts through Meta's two-step media-container workflow. The Instagram account must be a professional account connected to the Meta app, and each artifact must resolve to a public HTTPS JPEG URL that Meta can fetch.
+
+```sh
+INSTAGRAM_GRAPH_VERSION=v20.0
+INSTAGRAM_DRY_RUN=false
+INSTAGRAM_USER_ID=your_instagram_professional_account_id
+INSTAGRAM_ACCESS_TOKEN=your_instagram_access_token
+INSTAGRAM_MEDIA_BASE_URL=https://cdn.example.com/chloe-posts
+```
+
+For daily publishing, the S3 media service supplies `generated_metadata.public_media_url` automatically. `INSTAGRAM_MEDIA_BASE_URL` remains available for externally hosted artifact libraries. Local filesystem paths and PNG files are rejected by the Instagram adapter before Meta receives a publishing request.
+
+Private S3 media configuration:
+
+```sh
+S3_MEDIA_BUCKET=frikshun-social-media
+S3_MEDIA_REGION=us-east-1
+S3_MEDIA_PREFIX=social
+S3_PRESIGN_SECONDS=3600
+```
+
+AWS credentials come from the normal AWS SDK credential chain. Keep the bucket private; Instagram only needs the signed URL while Meta processes the media container.
+
+Instagram publishing creates a media container, waits for Meta to finish processing it, publishes the container, records the resulting media ID and permalink, and makes likes, comments, and incoming comment text available to the metrics poller.
+
+The Instagram adapter removes all raw URLs and the Facebook-specific archive, streaming, and FanVue footer before publishing. It inserts `Archive, music, and modeling links are available through my bio.` immediately before the final hashtag block. Facebook retains the complete standing footer and links.
+
 ## Post Metrics Polling
 
 Poll published post metrics from the UI:
@@ -129,7 +203,21 @@ Or from the command line:
 flask --app app poll-post-metrics
 ```
 
-The metrics layer is platform-neutral, but Facebook is the first live adapter. Each poll stores a new snapshot in `creator_post_metric_snapshots` and imports comments into `creator_post_interactions` with `reply_status=pending_review`.
+The metrics layer is platform-neutral and currently includes Facebook, Instagram, and X adapters. Each poll stores a new snapshot in `creator_post_metric_snapshots` and imports supported comments into `creator_post_interactions` with `reply_status=pending_review`.
+
+## X Publishing Setup
+
+The X adapter uses X API v2 to upload the artifact image, create the post, and collect impressions, likes, replies, reposts/quotes, bookmarks, and link clicks. Configure the app for Read and write access, then provide its OAuth 1.0a `X_CONSUMER_KEY`, `X_SECRET_KEY`, `X_ACCESS_TOKEN`, and `X_ACCESS_TOKEN_SECRET`. Set `X_USERNAME` and change `X_DRY_RUN=false` only after the identity check succeeds. Never commit these credentials.
+
+X posts are validated against the standard 280-character limit before any media is uploaded. Use the generated X-specific draft rather than sending the longer Facebook or Instagram caption unchanged.
+
+X captions are always link-free. The adapter removes raw URLs and the standing archive, music, and FanVue footer, then adds: `Links are in my bio. Search Chloe Katastrophe on major streaming platforms.` This keeps the post native to X and avoids the substantially higher API rate for posts containing URLs.
+
+## FanVue API Setup
+
+FanVue uses OAuth 2.0 publishing, media, and insights APIs. The private app requests only `read:self`, `read:post`, `write:post`, `read:media`, `write:media`, `read:insights`, and the required `openid offline_access offline` scopes. Authorization uses HTTPS and PKCE; refreshable tokens are stored privately under `instance/`.
+
+The FanVue adapter uploads a separate local image through FanVue's multipart media API, waits for processing, and creates a free `followers-and-subscribers` post. Daily runs require `--fanvue-image` and may use `--fanvue-body`. The FanVue artwork should be a distinct, more beautiful, artsy, and intimate interpretation of the same daily subject while remaining within the approved Chloe visual canon and image-generation safety rules. Likes, comments, and comment text feed the shared metrics and interaction-review UI.
 
 The interaction queue is intentionally review-first. It is the staging area for the planned scheduled process that will fetch new comments/messages and prepare Chloe-voice replies before anything is sent.
 

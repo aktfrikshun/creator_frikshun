@@ -18,10 +18,15 @@ DEFAULT_IMPORT_PATHS = (
     "stories",
     "brand",
     "releases",
+    "visuals",
 )
 
 DEFAULT_EXTRA_FILES = (
     Path("/Users/allentaylor/src/frikshun_image_studio/AGENTS.md"),
+    Path("/Users/allentaylor/src/frikshun_image_studio/studio/chloe-model/appearance.md"),
+    Path(
+        "/Users/allentaylor/src/frikshun_image_studio/studio/reference-packs/chloe_model_v1/MODEL_CARD.md"
+    ),
 )
 
 
@@ -120,6 +125,9 @@ class CanonImporter:
     def category_for(self, path):
         if path.name == "AGENTS.md":
             return "voice/persona"
+        lowered = str(path).lower()
+        if "chloe-model" in lowered or "reference-packs/chloe_model_v1" in lowered:
+            return "visual/persona"
         try:
             relative = path.relative_to(self.root)
         except ValueError:
@@ -133,6 +141,8 @@ class CanonImporter:
         if path.name == "AGENTS.md":
             return "voice_guidance"
         lowered = str(path).lower()
+        if "chloe-model" in lowered or "reference-packs/chloe_model_v1" in lowered:
+            return "reference"
         if "unresolved" in lowered or "open_mystery" in lowered:
             return "unresolved_mystery"
         if "draft" in lowered:

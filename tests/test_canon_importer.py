@@ -82,6 +82,61 @@ class CanonImporterTest(unittest.TestCase):
             self.assertEqual("voice_guidance", entry.canonical_status)
             self.assertTrue(entry.usable_in_generation)
 
+    def test_importer_loads_visual_canon_and_model_card(self):
+        visuals_dir = self.root / "visuals"
+        visuals_dir.mkdir(parents=True)
+        guide_file = visuals_dir / "VISUAL_REFERENCE_GUIDE.md"
+        guide_file.write_text(
+            "# Chloe Visual Guide\n\nLocked physical features and anti-drift rules.",
+            encoding="utf-8",
+        )
+
+        appearance_file = Path(self.archive.name) / "studio" / "chloe-model" / "appearance.md"
+        appearance_file.parent.mkdir(parents=True)
+        appearance_file.write_text(
+            "# Chloe Katastrophe Visual Canon\n\nFair skin, freckles, gray-green eyes.",
+            encoding="utf-8",
+        )
+        model_card_file = (
+            Path(self.archive.name)
+            / "studio"
+            / "reference-packs"
+            / "chloe_model_v1"
+            / "MODEL_CARD.md"
+        )
+        model_card_file.parent.mkdir(parents=True)
+        model_card_file.write_text(
+            "# MODEL_CARD - Chloe Model v1\n\nUse Chloe Model v1 as top-level visual canon.",
+            encoding="utf-8",
+        )
+
+        with self.app.app_context():
+            session = get_session()
+            result = CanonImporter(
+                session,
+                root=self.root,
+                import_paths=("visuals",),
+                extra_files=(appearance_file, model_card_file),
+            ).run()
+
+            self.assertEqual(3, result.created)
+
+            guide = session.query(CanonEntry).filter_by(title="Chloe Visual Guide").one()
+            self.assertEqual("visuals", guide.canon_category)
+            self.assertEqual("reference", guide.canonical_status)
+
+            appearance = (
+                session.query(CanonEntry)
+                .filter_by(title="Chloe Katastrophe Visual Canon")
+                .one()
+            )
+            self.assertEqual("visual/persona", appearance.canon_category)
+            self.assertEqual("reference", appearance.canonical_status)
+
+            model_card = session.query(CanonEntry).filter_by(title="MODEL_CARD - Chloe Model v1").one()
+            self.assertEqual("visual/persona", model_card.canon_category)
+            self.assertTrue(model_card.usable_in_generation)
+
 
 if __name__ == "__main__":
     unittest.main()

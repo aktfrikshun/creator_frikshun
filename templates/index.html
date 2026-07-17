@@ -219,6 +219,16 @@
         <div class="flash {{ category }}">{{ message }}</div>
       {% endfor %}
 
+      <section class="panel" aria-label="Publishing status" style="margin-top: 24px;">
+        <h2>Daily Publishing Status</h2>
+        <p>
+          Facebook <span class="status">{{ publishing_status.facebook }}</span>
+          Instagram <span class="status">{{ publishing_status.instagram }}</span>
+          S3 media <span class="status">{{ publishing_status.s3 }}</span>
+        </p>
+        <p class="meta">Daily artifacts publish once per platform and remain available for metric polling.</p>
+      </section>
+
       <div class="grid">
         <section class="panel" aria-label="Create artifact">
           <h2>Upload Artifact Metadata</h2>

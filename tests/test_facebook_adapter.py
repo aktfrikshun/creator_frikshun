@@ -1,4 +1,6 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
 from frikshun_creator.models import Artifact, PostDraft, PostPublication
@@ -36,6 +38,108 @@ class FacebookAdapterTest(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual("manual_required", result.status)
         self.assertIn("Personal profile", result.error_message)
+
+    def test_publish_image_artifact_uses_photos_endpoint(self):
+        with TemporaryDirectory() as directory:
+            image_path = Path(directory) / "signal.jpg"
+            image_path.write_bytes(b"fake image bytes")
+            artifact = Artifact(
+                title="Image Signal",
+                media_path=str(image_path),
+                media_content_type="image/jpeg",
+            )
+            draft = PostDraft(
+                artifact=artifact,
+                platform="facebook",
+                caption="Image post copy.",
+                hashtags=["ChloKat"],
+            )
+            response = Mock()
+            response.ok = True
+            response.json.return_value = {
+                "id": "photo_1",
+                "post_id": "page_1_photo_1",
+            }
+
+            with patch("frikshun_creator.publishers.facebook.requests.post", return_value=response) as post:
+                result = FacebookAdapter(
+                    dry_run=False,
+                    page_id="page_1",
+                    access_token="token",
+                ).publish(draft)
+
+        self.assertTrue(result.success)
+        self.assertEqual("page_1_photo_1", result.external_post_id)
+        self.assertIn("/photos", post.call_args.args[0])
+        self.assertIn("caption", post.call_args.kwargs["data"])
+        self.assertIn("source", post.call_args.kwargs["files"])
+
+    def test_publish_image_falls_back_to_unpublished_photo_then_feed_post(self):
+        with TemporaryDirectory() as directory:
+            image_path = Path(directory) / "signal.jpg"
+            image_path.write_bytes(b"fake image bytes")
+            artifact = Artifact(
+                title="Image Signal",
+                media_path=str(image_path),
+                media_content_type="image/jpeg",
+            )
+            draft = PostDraft(
+                artifact=artifact,
+                platform="facebook",
+                caption="Image post copy with a long caption.",
+                hashtags=["ChloKat"],
+            )
+            initial = Mock()
+            initial.ok = False
+            initial.reason = "Bad Request"
+            initial.json.return_value = {
+                "error": {"message": "Please reduce the amount of data you're asking for, then retry your request"}
+            }
+            upload = Mock()
+            upload.ok = True
+            upload.json.return_value = {"id": "photo_1"}
+            feed = Mock()
+            feed.ok = True
+            feed.json.return_value = {"id": "page_1_post_1"}
+
+            with patch("frikshun_creator.publishers.facebook.requests.post", side_effect=[initial, upload, feed]) as post:
+                result = FacebookAdapter(
+                    dry_run=False,
+                    page_id="page_1",
+                    access_token="token",
+                ).publish(draft)
+
+        self.assertTrue(result.success)
+        self.assertEqual("page_1_post_1", result.external_post_id)
+        self.assertIn("/photos", post.call_args_list[0].args[0])
+        self.assertEqual("false", post.call_args_list[1].kwargs["data"]["published"])
+        self.assertIn("/feed", post.call_args_list[2].args[0])
+        self.assertIn("attached_media[0]", post.call_args_list[2].kwargs["data"])
+
+    def test_publish_text_artifact_uses_feed_endpoint(self):
+        artifact = Artifact(title="Text Signal")
+        draft = PostDraft(
+            artifact=artifact,
+            platform="facebook",
+            caption="Text-only post copy.",
+            hashtags=["ChloKat"],
+        )
+        response = Mock()
+        response.ok = True
+        response.json.return_value = {"id": "page_1_post_1"}
+
+        with patch("frikshun_creator.publishers.facebook.requests.post", return_value=response) as post:
+            result = FacebookAdapter(
+                dry_run=False,
+                page_id="page_1",
+                access_token="token",
+            ).publish(draft)
+
+        self.assertTrue(result.success)
+        self.assertEqual("page_1_post_1", result.external_post_id)
+        self.assertIn("/feed", post.call_args.args[0])
+        self.assertIn("message", post.call_args.kwargs["data"])
+        self.assertNotIn("files", post.call_args.kwargs)
 
     def test_fetch_post_metrics_parses_graph_payload(self):
         publication = PostPublication(

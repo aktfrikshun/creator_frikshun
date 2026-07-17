@@ -1,5 +1,6 @@
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from uuid import uuid4
 
 import requests
@@ -72,9 +73,16 @@ class FacebookAdapter(PublisherAdapter):
                     "target_type": self.target_type,
                     "page_id": self.page_id,
                     "message": message,
+                    "media_path": self.media_path(post_draft),
+                    "publish_kind": self.publish_kind(post_draft),
                 },
             )
 
+        if self.should_publish_photo(post_draft):
+            return self.publish_photo(post_draft, message)
+        return self.publish_feed_post(message)
+
+    def publish_feed_post(self, message):
         endpoint = f"https://graph.facebook.com/{self.graph_version}/{self.page_id}/feed"
         response = requests.post(
             endpoint,
@@ -106,6 +114,149 @@ class FacebookAdapter(PublisherAdapter):
             external_url=f"https://www.facebook.com/{external_post_id}" if external_post_id else "",
             raw_response=payload,
         )
+
+    def publish_photo(self, post_draft, message):
+        media_path = Path(self.media_path(post_draft))
+        endpoint = f"https://graph.facebook.com/{self.graph_version}/{self.page_id}/photos"
+        with media_path.open("rb") as image_file:
+            response = requests.post(
+                endpoint,
+                data={
+                    "caption": message,
+                    "access_token": self.access_token,
+                },
+                files={"source": (media_path.name, image_file, self.media_content_type(post_draft))},
+                timeout=30,
+            )
+
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {"raw_body": response.text}
+
+        if not response.ok:
+            error_message = payload.get("error", {}).get("message", response.reason)
+            if message and self.should_fallback_to_attached_media(error_message):
+                fallback = self.publish_photo_then_feed_post(post_draft, message)
+                fallback.raw_response = {
+                    "initial_photo_error": payload,
+                    "fallback": fallback.raw_response,
+                }
+                return fallback
+            return PublishResult(
+                success=False,
+                status="failed",
+                error_message=error_message,
+                raw_response=payload,
+            )
+
+        external_post_id = payload.get("post_id") or payload.get("id", "")
+        external_url = f"https://www.facebook.com/{external_post_id}" if external_post_id else ""
+        return PublishResult(
+            success=True,
+            status="published",
+            external_post_id=external_post_id,
+            external_url=external_url,
+            raw_response={**payload, "publish_kind": "photo"},
+        )
+
+    def publish_photo_then_feed_post(self, post_draft, message):
+        media_path = Path(self.media_path(post_draft))
+        photo_endpoint = f"https://graph.facebook.com/{self.graph_version}/{self.page_id}/photos"
+        with media_path.open("rb") as image_file:
+            upload_response = requests.post(
+                photo_endpoint,
+                data={
+                    "published": "false",
+                    "access_token": self.access_token,
+                },
+                files={"source": (media_path.name, image_file, self.media_content_type(post_draft))},
+                timeout=30,
+            )
+
+        try:
+            upload_payload = upload_response.json()
+        except ValueError:
+            upload_payload = {"raw_body": upload_response.text}
+
+        if not upload_response.ok:
+            return PublishResult(
+                success=False,
+                status="failed",
+                error_message=upload_payload.get("error", {}).get("message", upload_response.reason),
+                raw_response={"photo_upload": upload_payload},
+            )
+
+        photo_id = str(upload_payload.get("id") or "")
+        if not photo_id:
+            return PublishResult(
+                success=False,
+                status="failed",
+                error_message="Facebook unpublished photo upload did not return an id.",
+                raw_response={"photo_upload": upload_payload},
+            )
+
+        feed_endpoint = f"https://graph.facebook.com/{self.graph_version}/{self.page_id}/feed"
+        feed_response = requests.post(
+            feed_endpoint,
+            data={
+                "message": message,
+                "attached_media[0]": f'{{"media_fbid":"{photo_id}"}}',
+                "access_token": self.access_token,
+            },
+            timeout=20,
+        )
+
+        try:
+            feed_payload = feed_response.json()
+        except ValueError:
+            feed_payload = {"raw_body": feed_response.text}
+
+        if not feed_response.ok:
+            return PublishResult(
+                success=False,
+                status="failed",
+                error_message=feed_payload.get("error", {}).get("message", feed_response.reason),
+                raw_response={"photo_upload": upload_payload, "feed_publish": feed_payload},
+            )
+
+        external_post_id = feed_payload.get("id", "")
+        return PublishResult(
+            success=True,
+            status="published",
+            external_post_id=external_post_id,
+            external_url=f"https://www.facebook.com/{external_post_id}" if external_post_id else "",
+            raw_response={
+                "photo_upload": upload_payload,
+                "feed_publish": feed_payload,
+                "publish_kind": "photo_attached_feed",
+            },
+        )
+
+    def should_publish_photo(self, post_draft):
+        media_path = self.media_path(post_draft)
+        return (
+            self.media_content_type(post_draft).startswith("image/")
+            and bool(media_path)
+            and Path(media_path).exists()
+        )
+
+    def publish_kind(self, post_draft):
+        if self.should_publish_photo(post_draft):
+            return "photo"
+        return "feed"
+
+    def should_fallback_to_attached_media(self, error_message):
+        normalized = str(error_message or "").lower()
+        return "reduce the amount of data" in normalized
+
+    def media_path(self, post_draft):
+        artifact = getattr(post_draft, "artifact", None)
+        return getattr(artifact, "media_path", "") or ""
+
+    def media_content_type(self, post_draft):
+        artifact = getattr(post_draft, "artifact", None)
+        return getattr(artifact, "media_content_type", "") or ""
 
     def fetch_post_metrics(self, post_publication):
         if self.dry_run:
@@ -173,7 +324,7 @@ class FacebookAdapter(PublisherAdapter):
             "permalink_url,shares,"
             "comments.limit(25).summary(true){id,from,message,created_time,permalink_url},"
             "reactions.limit(0).summary(true),"
-            "insights.metric(post_impressions,post_impressions_unique,post_engaged_users,post_clicks)"
+            "insights.metric(post_clicks)"
         )
         response = requests.get(
             endpoint,
