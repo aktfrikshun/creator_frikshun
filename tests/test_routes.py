@@ -1,6 +1,8 @@
 from io import BytesIO
 from tempfile import TemporaryDirectory
 import unittest
+from urllib.parse import urlparse
+from unittest.mock import patch
 
 from frikshun_creator import create_app
 from frikshun_creator.db import get_session
@@ -17,6 +19,10 @@ class RoutesTest(unittest.TestCase):
                 "AUTO_CREATE_TABLES": True,
                 "UPLOAD_FOLDER": self.uploads.name,
                 "MEDIA_ANALYZER_PROVIDER": "local",
+                "THREADS_APP_ID": "threads-app",
+                "THREADS_APP_SECRET": "threads-secret",
+                "THREADS_REDIRECT_URI": "https://example.test/oauth/threads/callback",
+                "THREADS_TOKEN_PATH": f"{self.uploads.name}/threads_oauth.json",
             }
         )
         self.client = self.app.test_client()
@@ -45,7 +51,7 @@ class RoutesTest(unittest.TestCase):
         with self.app.app_context():
             session = get_session()
             drafts = session.query(PostDraft).all()
-            self.assertEqual(7, len(drafts))
+            self.assertEqual(8, len(drafts))
             facebook = next(draft for draft in drafts if draft.platform == "facebook")
 
         response = self.client.get(f"/drafts/{facebook.id}")
@@ -164,6 +170,75 @@ class RoutesTest(unittest.TestCase):
         with self.app.app_context():
             publication = get_session().query(PostPublication).filter_by(platform="x").one()
             self.assertTrue(publication.external_post_id.startswith("dry-run-x-"))
+
+    def test_threads_dry_run_publishes_image_draft_from_review_page(self):
+        with self.app.app_context():
+            session = get_session()
+            artifact = Artifact(
+                title="Threads Signal",
+                media_path="/local/threads-signal.jpg",
+                media_content_type="image/jpeg",
+                generated_metadata={
+                    "public_media_url": "https://cdn.example.test/threads-signal.jpg"
+                },
+            )
+            session.add(artifact)
+            session.flush()
+            draft = PostDraft(
+                artifact_id=artifact.id,
+                platform="threads",
+                caption="A thread survives. Which version of you keeps speaking?",
+                hashtags=["ChloKat"],
+            )
+            session.add(draft)
+            session.commit()
+            draft_id = draft.id
+
+        review = self.client.get(f"/drafts/{draft_id}")
+        self.assertIn(b"Review Threads Draft", review.data)
+        self.assertIn(b"Dry Run Publish", review.data)
+        response = self.client.post(
+            f"/drafts/{draft_id}/publish/threads",
+            data={
+                "caption": "A thread survives. Which version of you keeps speaking?",
+                "call_to_action": "",
+                "hashtags": "ChloKat",
+            },
+            follow_redirects=True,
+        )
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"Threads published.", response.data)
+        with self.app.app_context():
+            publication = get_session().query(PostPublication).filter_by(platform="threads").one()
+            self.assertTrue(publication.external_post_id.startswith("dry-run-threads-"))
+
+    def test_threads_oauth_start_redirects_to_threads_authorize_url(self):
+        response = self.client.get("/oauth/threads/start")
+        self.assertEqual(302, response.status_code)
+        location = response.headers["Location"]
+        self.assertEqual("threads.net", urlparse(location).netloc)
+        self.assertIn("client_id=threads-app", location)
+
+    def test_threads_oauth_callback_exchanges_and_stores_token(self):
+        self.client.get("/oauth/threads/start")
+        with self.client.session_transaction() as session:
+            state = session["threads_oauth_state"]
+
+        response_payload = {
+            "access_token": "long-token",
+            "long_lived_access_token": "long-token",
+            "user_id": "123",
+            "expires_in": 5184000,
+        }
+        with patch("frikshun_creator.routes.ThreadsOAuth.exchange", return_value=response_payload) as exchange:
+            response = self.client.get(
+                f"/oauth/threads/callback?code=code-1&state={state}",
+                follow_redirects=True,
+            )
+
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"Threads authorization succeeded.", response.data)
+        exchange.assert_called_once_with("code-1")
 
     def test_fanvue_dry_run_publishes_separate_image_from_review_page(self):
         image_path = f"{self.uploads.name}/fanvue-signal.jpg"
@@ -309,7 +384,7 @@ class RoutesTest(unittest.TestCase):
         )
         response = self.client.post("/drafts/cleanup-unpublished", follow_redirects=True)
         self.assertEqual(200, response.status_code)
-        self.assertIn(b"Archived 13 unpublished drafts.", response.data)
+        self.assertIn(b"Archived 15 unpublished drafts.", response.data)
         self.assertNotIn(b"Second Cleanup Signal", response.data)
 
     def test_metrics_dashboard_displays_published_post_snapshot(self):

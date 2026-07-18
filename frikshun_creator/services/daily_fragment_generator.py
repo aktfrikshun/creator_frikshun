@@ -2,6 +2,7 @@ import base64
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -153,14 +154,33 @@ class DailyFragmentGenerator:
         api_key=None,
         max_plan_attempts=3,
         chloe_reference_image=None,
+        chloe_reference_images=None,
+        openai_rate_limit_retries=3,
+        openai_rate_limit_max_sleep_seconds=20,
     ):
         self.upload_folder = Path(upload_folder)
         self.text_model = text_model or os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1")
         self.image_model = image_model or os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
         self.api_key = api_key or os.getenv("OPENAI_API_KEY", "")
         self.max_plan_attempts = max(1, int(max_plan_attempts))
-        configured_reference = chloe_reference_image or os.getenv("CHLOE_VISUAL_REFERENCE_IMAGE", "")
-        self.chloe_reference_image = Path(configured_reference).expanduser() if configured_reference else None
+        env_retry_count = os.getenv("OPENAI_RATE_LIMIT_RETRIES")
+        env_max_sleep = os.getenv("OPENAI_RATE_LIMIT_MAX_SLEEP_SECONDS")
+        self.openai_rate_limit_retries = max(
+            0,
+            int(env_retry_count if env_retry_count not in (None, "") else openai_rate_limit_retries),
+        )
+        self.openai_rate_limit_max_sleep_seconds = max(
+            1,
+            int(env_max_sleep if env_max_sleep not in (None, "") else openai_rate_limit_max_sleep_seconds),
+        )
+        configured_references = self.normalize_reference_image_paths(
+            chloe_reference_images
+            or os.getenv("CHLOE_VISUAL_REFERENCE_IMAGES", "")
+            or chloe_reference_image
+            or os.getenv("CHLOE_VISUAL_REFERENCE_IMAGE", "")
+        )
+        self.chloe_reference_images = configured_references
+        self.chloe_reference_image = configured_references[0] if configured_references else None
 
     def generate(self, local_date, generation_context):
         selected_lane = self.select_content_lane(local_date, generation_context)
@@ -176,7 +196,7 @@ class DailyFragmentGenerator:
             )
             plan = self.repair_plan(plan, selected_lane=selected_lane)
             try:
-                self.validate_plan(plan)
+                self.validate_plan(plan, selected_lane=selected_lane)
                 last_error = None
                 break
             except ValueError as error:
@@ -190,12 +210,18 @@ class DailyFragmentGenerator:
         self.generate_image(plan.public_image_prompt, public_path)
         self.generate_image(plan.fanvue_image_prompt, fanvue_path)
         return DailyFragmentPackage(
-            title=f"Recovered Fragment — {plan.title_suffix}",
+            title=f"{self.title_prefix_for_lane(selected_lane)} — {plan.title_suffix}",
             body=self.compose_canonical_body(plan.canonical_body, plan.canonical_hashtags),
+            threads_body=self.compose_threads_body(
+                plan.canonical_body,
+                plan.canonical_hashtags,
+                fallback_body=plan.x_body,
+            ),
             x_body=self.compose_x_body(plan.x_body, plan.x_hashtags),
             fanvue_body=plan.fanvue_body.strip(),
             public_image_path=public_path,
             fanvue_image_path=fanvue_path,
+            content_tags=self.content_tags_for_lane(selected_lane),
         )
 
     def generate_preview(self, local_date, generation_context, selected_lane):
@@ -211,7 +237,7 @@ class DailyFragmentGenerator:
             )
             plan = self.repair_plan(plan, selected_lane=selected_lane)
             try:
-                self.validate_plan(plan)
+                self.validate_plan(plan, selected_lane=selected_lane)
                 last_error = None
                 break
             except ValueError as error:
@@ -222,7 +248,7 @@ class DailyFragmentGenerator:
         return DailyFragmentPreview(
             local_date=local_date.isoformat(),
             lane=selected_lane,
-            title=f"Recovered Fragment — {plan.title_suffix}",
+            title=f"{self.title_prefix_for_lane(selected_lane)} — {plan.title_suffix}",
             canonical_body=plan.canonical_body.strip(),
             x_body=self.compose_x_body(plan.x_body, plan.x_hashtags),
             fanvue_body=plan.fanvue_body.strip(),
@@ -264,14 +290,22 @@ class DailyFragmentGenerator:
                 ),
                 min_paragraphs=2,
             ),
-            public_image_prompt=self.repair_image_prompt(plan.public_image_prompt.strip(), intimate=False),
-            fanvue_image_prompt=self.repair_image_prompt(plan.fanvue_image_prompt.strip(), intimate=True),
+            public_image_prompt=self.repair_image_prompt(
+                plan.public_image_prompt.strip(),
+                selected_lane=selected_lane,
+                intimate=False,
+            ),
+            fanvue_image_prompt=self.repair_image_prompt(
+                plan.fanvue_image_prompt.strip(),
+                selected_lane=selected_lane,
+                intimate=True,
+            ),
         )
 
     def generate_plan(self, local_date, generation_context, selected_lane, feedback=""):
         if not self.api_key:
             raise ValueError("OPENAI_API_KEY is required for daily fragment generation.")
-        response = requests.post(
+        response = self.post_with_rate_limit_retry(
             "https://api.openai.com/v1/responses",
             headers={
                 "Authorization": f"Bearer {self.api_key}",
@@ -326,9 +360,13 @@ class DailyFragmentGenerator:
             "Stay inside today's required lane instead of drifting back to generic fragment language.\n"
             "Do not use current news. Do not invent current product claims, brand recommendations, prices, or factual reviews. "
             "If today's lane touches gear, clothing, cosmetics, or travel equipment, keep it grounded in personal taste, technique, atmosphere, or timeless practical preference rather than unverified specifics.\n"
-            "Write in Chloe's first-person voice: intelligent, observant, emotionally restrained but vivid, "
-            "dryly funny when appropriate, sensual without carelessness, skeptical of easy stories, drawn "
-            "toward truth and beauty inside darkness.\n"
+            "Write in Chloe's first-person voice: intelligent, observant, enthusiastic, flirty, fierce, curious, and engaging, "
+            "full of wonder and excitement at discovering new things, dryly funny when appropriate, sensual without carelessness, "
+            "socially alive, and confident without sounding generic.\n"
+            "Default to bright, welcoming, high-energy, or teasing emotional color unless the specific subject truly requires something quieter. "
+            "Avoid moody, brooding, elegiac, mournful, haunted, or emotionally shut-down copy by default.\n"
+            "Use archive, recovered-memory, artifact, mirror-of-loss, or continuity-after-damage framing only when today's required lane is reconstruction. "
+            "If today's lane is philosophy, lifestyle, music, travel, or craft, the title and body should feel native to that lane rather than like another recovered fragment.\n"
             "Return JSON only with these keys: title_suffix, canonical_body, canonical_hashtags, x_body, "
             "x_hashtags, fanvue_body, public_image_prompt, fanvue_image_prompt.\n"
             "Constraints:\n"
@@ -337,8 +375,13 @@ class DailyFragmentGenerator:
             "- x_body: no more than 190 characters including spaces, exactly one question, no URLs, no solicitation, no funding language.\n"
             "- x_hashtags: 1 to 3 relevant tags without # symbols.\n"
             "- fanvue_body: closer and more intimate than the public caption, still in character, short paragraphs with visible paragraph breaks, exactly one thoughtful question, no explicit sexual content by default.\n"
-            "- public_image_prompt: square 1:1, cinematic, intelligent, emotionally restrained, beautiful inside darkness, ambiguous without generic horror, no text or logos.\n"
-            "- fanvue_image_prompt: square 1:1, same subject, more beautiful, artsy, intimate, expressive light, tactile detail, closeness, elegance, vulnerability, no text or logos.\n"
+            "- canonical_body should usually feel lively, inviting, self-possessed, playful, or boldly thoughtful rather than melancholy.\n"
+            "- x_body should usually feel vivid, sharp, playful, or provocative rather than solemn.\n"
+            "- fanvue_body should usually feel warm, magnetic, playful, and close rather than mournful.\n"
+            "- public_image_prompt: square 1:1, cinematic, intelligent, glamorous, expressive, confident, and engaging, no generic horror, no text or logos.\n"
+            "- fanvue_image_prompt: square 1:1, same subject, beautiful, artsy, intimate, expressive light, tactile detail, closeness, elegance, warmth, and allure, no text or logos.\n"
+            "- If Chloe is depicted, do not make her look sad, stoic, blank, or emotionally shut down by default.\n"
+            f"- Chloe should usually read as enthusiastic, flirty, fierce, curious, wonderstruck, or engaging in a lane-appropriate way. Today's visual emotion range: {self.emotion_guidance_for_lane(selected_lane)}.\n"
             "- Default to depicting Chloe herself, in her approved visual canon, when visual canon guidance is available and the subject supports a character-centered image.\n"
             "- If an image depicts Chloe, it must explicitly aim for the approved Chloe Katastrophe visual canon and be recognizable as Chloe, not a generic woman.\n"
             "- Only prefer abstract art, objects, places, reflections, hands, silhouettes, or still-life imagery when the subject clearly works better without showing Chloe directly.\n"
@@ -364,6 +407,66 @@ class DailyFragmentGenerator:
                 f"Validation failure to correct: {feedback}"
             )
         return prompt
+
+    def post_with_rate_limit_retry(self, url, **kwargs):
+        attempts = self.openai_rate_limit_retries + 1
+        last_error = None
+        for attempt in range(1, attempts + 1):
+            response = requests.post(url, **kwargs)
+            try:
+                response.raise_for_status()
+                return response
+            except requests.HTTPError as error:
+                last_error = error
+                if not self.is_rate_limit_error(error):
+                    raise
+                if attempt >= attempts:
+                    raise
+                time.sleep(self.rate_limit_sleep_seconds(error, attempt))
+        if last_error:
+            raise last_error
+        raise RuntimeError("OpenAI request failed without an HTTP response.")
+
+    def is_rate_limit_error(self, error):
+        response = getattr(error, "response", None)
+        return bool(response is not None and response.status_code == 429)
+
+    def openai_error_summary(self, error):
+        response = getattr(error, "response", None)
+        if response is None:
+            return str(error)
+        payload = {}
+        try:
+            payload = response.json() or {}
+        except ValueError:
+            payload = {}
+        error_payload = payload.get("error") or {}
+        error_type = str(error_payload.get("type") or "").strip()
+        error_code = str(error_payload.get("code") or "").strip()
+        error_message = str(error_payload.get("message") or response.reason or str(error)).strip()
+        request_id = str(response.headers.get("x-request-id", "")).strip()
+        retry_after = str(response.headers.get("retry-after", "")).strip()
+        parts = [f"http_status={response.status_code}"]
+        if error_type:
+            parts.append(f"type={error_type}")
+        if error_code:
+            parts.append(f"code={error_code}")
+        if retry_after:
+            parts.append(f"retry_after={retry_after}")
+        if request_id:
+            parts.append(f"x_request_id={request_id}")
+        if error_message:
+            parts.append(f"message={error_message}")
+        return ", ".join(parts)
+
+    def rate_limit_sleep_seconds(self, error, attempt):
+        response = getattr(error, "response", None)
+        retry_after = ""
+        if response is not None:
+            retry_after = str(response.headers.get("retry-after", "")).strip()
+        if retry_after.isdigit():
+            return min(self.openai_rate_limit_max_sleep_seconds, max(1, int(retry_after)))
+        return min(self.openai_rate_limit_max_sleep_seconds, 2 ** attempt)
 
     def select_content_lane(self, local_date, generation_context):
         lane_names = self.content_lane_names()
@@ -411,6 +514,28 @@ class DailyFragmentGenerator:
                 return description
         return CONTENT_LANES[0][1]
 
+    def title_prefix_for_lane(self, lane_name):
+        prefixes = {
+            "reconstruction": "Recovered Fragment",
+            "philosophy": "Chloe Thinking",
+            "lifestyle": "Chloe Living",
+            "music": "Studio Note",
+            "travel": "Field Note",
+            "craft": "Creator Note",
+        }
+        return prefixes.get(lane_name, "Chloe Note")
+
+    def content_tags_for_lane(self, lane_name):
+        tags = {
+            "reconstruction": ["recovered-fragment", "identity", "echo-traversal"],
+            "philosophy": ["philosophy", "identity", "discussion"],
+            "lifestyle": ["lifestyle", "persona", "daily-life"],
+            "music": ["music", "creator", "studio"],
+            "travel": ["travel", "place", "movement"],
+            "craft": ["craft", "creator", "visuals"],
+        }
+        return tags.get(lane_name, ["chloe", "social"])
+
     def fallback_question_for_lane(self, lane_name, intimate=False, short=False):
         variants = {
             "reconstruction": (
@@ -455,9 +580,14 @@ class DailyFragmentGenerator:
         return public
 
     def generate_image(self, prompt, destination_path):
-        reference_image = self.reference_image_for_prompt(prompt)
-        if reference_image:
-            return self.generate_image_with_reference(prompt, destination_path, reference_image)
+        reference_images = self.reference_images_for_prompt(prompt)
+        if reference_images:
+            try:
+                return self.generate_image_with_reference(prompt, destination_path, reference_images)
+            except requests.HTTPError:
+                # If the edit endpoint rejects a particular shot, fall back to plain generation
+                # rather than aborting the whole content run.
+                pass
 
         response = requests.post(
             "https://api.openai.com/v1/images/generations",
@@ -478,8 +608,23 @@ class DailyFragmentGenerator:
         destination_path.parent.mkdir(parents=True, exist_ok=True)
         destination_path.write_bytes(base64.b64decode(image_data[0]["b64_json"]))
 
-    def generate_image_with_reference(self, prompt, destination_path, reference_image):
-        with reference_image.open("rb") as handle:
+    def generate_image_with_reference(self, prompt, destination_path, reference_images):
+        handles = []
+        try:
+            files = []
+            for reference_image in reference_images:
+                handle = reference_image.open("rb")
+                handles.append(handle)
+                files.append(
+                    (
+                        "image[]",
+                        (
+                            reference_image.name,
+                            handle,
+                            "image/png",
+                        ),
+                    )
+                )
             response = requests.post(
                 "https://api.openai.com/v1/images/edits",
                 headers={"Authorization": f"Bearer {self.api_key}"},
@@ -490,15 +635,12 @@ class DailyFragmentGenerator:
                     "output_format": "png",
                     "input_fidelity": "high",
                 },
-                files={
-                    "image[]": (
-                        reference_image.name,
-                        handle,
-                        "image/png",
-                    )
-                },
+                files=files,
                 timeout=180,
             )
+        finally:
+            for handle in handles:
+                handle.close()
         response.raise_for_status()
         payload = response.json()
         image_data = payload.get("data") or []
@@ -507,17 +649,19 @@ class DailyFragmentGenerator:
         destination_path.parent.mkdir(parents=True, exist_ok=True)
         destination_path.write_bytes(base64.b64decode(image_data[0]["b64_json"]))
 
-    def reference_image_for_prompt(self, prompt):
+    def reference_images_for_prompt(self, prompt):
         if not self.prompt_depicts_chloe(prompt):
-            return None
+            return []
 
-        if self.chloe_reference_image and self.chloe_reference_image.exists():
-            return self.chloe_reference_image
+        configured = [path for path in self.chloe_reference_images if path.exists()]
+        if configured:
+            return configured
 
-        for candidate in DEFAULT_CHLOE_REFERENCE_IMAGE_CANDIDATES:
-            if candidate.exists():
-                return candidate
-        return None
+        return [candidate for candidate in DEFAULT_CHLOE_REFERENCE_IMAGE_CANDIDATES if candidate.exists()]
+
+    def reference_image_for_prompt(self, prompt):
+        images = self.reference_images_for_prompt(prompt)
+        return images[0] if images else None
 
     def prompt_depicts_chloe(self, prompt):
         lower = str(prompt or "").lower()
@@ -529,7 +673,41 @@ class DailyFragmentGenerator:
     def compose_x_body(self, body, hashtags):
         return f"{body.strip()}\n\n{' '.join(f'#{tag}' for tag in hashtags)}".strip()
 
-    def validate_plan(self, plan):
+    def compose_threads_body(self, body, hashtags, fallback_body=""):
+        footer = "Archive, music, and modeling links are available through my bio."
+        tags = [self.normalize_tag(tag) for tag in hashtags[:3]]
+        hashtag_text = " ".join(f"#{tag}" for tag in tags if tag).strip()
+
+        candidates = []
+        cleaned_body = self.strip_urls_and_domains(body).strip()
+        if cleaned_body:
+            candidates.append(cleaned_body)
+            paragraphs = [paragraph.strip() for paragraph in cleaned_body.split("\n\n") if paragraph.strip()]
+            if len(paragraphs) > 1:
+                candidates.append("\n\n".join(paragraphs[:2]))
+                candidates.append(paragraphs[-1])
+        cleaned_fallback = self.strip_urls_and_domains(fallback_body).strip()
+        if cleaned_fallback:
+            candidates.append(cleaned_fallback)
+
+        for candidate in candidates:
+            parts = [candidate, footer]
+            if hashtag_text:
+                parts.append(hashtag_text)
+            composed = "\n\n".join(part for part in parts if part).strip()
+            if len(composed) <= 500 and self.question_count(composed) == 1:
+                return composed
+
+        base = cleaned_fallback or cleaned_body or ""
+        reserved = len(footer) + (len(hashtag_text) + 4 if hashtag_text else 0)
+        limit = max(120, 500 - reserved)
+        trimmed = self.truncate_preserving_question(base, limit)
+        parts = [trimmed, footer]
+        if hashtag_text:
+            parts.append(hashtag_text)
+        return "\n\n".join(part for part in parts if part).strip()
+
+    def validate_plan(self, plan, selected_lane="reconstruction"):
         if not plan.title_suffix:
             raise ValueError("Daily fragment title suffix is missing.")
         if self.question_count(plan.canonical_body) != 1:
@@ -552,6 +730,23 @@ class DailyFragmentGenerator:
             raise ValueError("Canonical body must contain visible paragraph breaks.")
         if not self.has_visible_paragraph_breaks(plan.fanvue_body):
             raise ValueError("FanVue body must contain visible paragraph breaks.")
+        if selected_lane != "reconstruction":
+            if self.has_reconstruction_framing(plan.title_suffix):
+                raise ValueError("Non-reconstruction title must not use recovered-fragment framing.")
+            if self.has_reconstruction_framing(plan.canonical_body):
+                raise ValueError("Non-reconstruction canonical body must not read like a recovered fragment.")
+
+    def has_reconstruction_framing(self, text):
+        value = str(text or "").lower()
+        patterns = (
+            "recovered fragment",
+            "recovered memory",
+            "artifact analysis",
+            "archive fragment",
+            "archival scanner",
+            "reconstruction of my memory",
+        )
+        return any(pattern in value for pattern in patterns)
 
     def extract_response_text(self, payload):
         if payload.get("output_text"):
@@ -649,7 +844,29 @@ class DailyFragmentGenerator:
         parts = re.split(r"(?<=[.!?])\s+(?=[A-Z\"“])", protected)
         return [part.strip() for part in parts if part.strip()]
 
-    def repair_image_prompt(self, prompt, intimate=False):
+    def truncate_preserving_question(self, text, limit):
+        value = re.sub(r"\s+", " ", str(text or "")).strip()
+        if len(value) <= limit:
+            return value
+        question_index = value.rfind("?")
+        if question_index != -1:
+            start = max(0, question_index - limit + 1)
+            snippet = value[start:question_index + 1].strip()
+            if start > 0:
+                first_space = snippet.find(" ")
+                if first_space != -1:
+                    snippet = snippet[first_space + 1:].strip()
+            if len(snippet) <= limit and snippet.endswith("?"):
+                return snippet
+        truncated = value[:limit].rstrip()
+        last_space = truncated.rfind(" ")
+        if last_space > 80:
+            truncated = truncated[:last_space].rstrip()
+        if truncated and truncated[-1] not in ".!?":
+            truncated = f"{truncated}."
+        return self.ensure_single_question(truncated, "Which version still feels true?")
+
+    def repair_image_prompt(self, prompt, selected_lane="reconstruction", intimate=False):
         value = re.sub(r"\s+", " ", str(prompt or "")).strip()
         if not value:
             return value
@@ -669,9 +886,9 @@ class DailyFragmentGenerator:
 
         if has_person and not mentions_chloe:
             mood = (
-                "More intimate, tactile, elegant, vulnerable, expressive light."
+                "More intimate, tactile, elegant, warm, magnetic, expressive light."
                 if intimate
-                else "Cinematic, emotionally restrained, beautiful inside darkness."
+                else "Cinematic, glamorous, expressive, confident, and engaging."
             )
             return (
                 f"Abstract or object-based visual interpretation of the same subject. {mood} "
@@ -687,7 +904,58 @@ class DailyFragmentGenerator:
                 "gray-green eyes with subtle amber flecks, dark chestnut-to-nearly-black naturally wavy hair, delicate facial structure, quiet strength, restrained intelligent gaze."
             )
 
+        if mentions_chloe:
+            value += f" {self.emotion_prompt_clause(selected_lane, intimate=intimate)}"
+
         return value
+
+    def emotion_guidance_for_lane(self, lane_name):
+        guidance = {
+            "reconstruction": "wonderstruck, enthusiastic, curious, flirtatious, fiercely alive, playful, or vividly engaged",
+            "philosophy": "curious, wonderstruck, sly, amused, fierce, engaged, or intellectually seductive",
+            "lifestyle": "enthusiastic, flirty, playful, wonderstruck, fierce, warm, self-possessed, or mischievous",
+            "music": "excited, charged, wonderstruck, playful, fierce, teasing, or creatively exhilarated",
+            "travel": "curious, delighted, wonderstruck, flirty, windswept, fierce, playful, or seduced by place",
+            "craft": "curious, wonderstruck, exacting, teasing, fierce, confident, engaged, or thrilled by detail",
+        }
+        return guidance.get(lane_name, guidance["lifestyle"])
+
+    def emotion_prompt_clause(self, lane_name, intimate=False):
+        lane_guidance = self.emotion_guidance_for_lane(lane_name)
+        if intimate:
+            return (
+                "Let Chloe show clear, readable feeling in a subtle but unmistakable way. "
+                f"Favor expressions and body language from this range when appropriate: {lane_guidance}. "
+                "Default to warm, inviting, magnetic, playful, emotionally present, and visibly delighted by discovery. "
+                "Do not make her look sad, stoic, blank, moody, or emotionally shut down unless the subject absolutely requires it."
+            )
+        return (
+            "Let Chloe read as enthusiastic, flirty, fierce, curious, wonderstruck, and engaging in a lane-appropriate way. "
+            f"Favor expressions and body language from this range when appropriate: {lane_guidance}. "
+            "Default to bright, inviting, playful, socially alive, and visibly excited by discovery. "
+            "Do not make her look sad, stoic, blank, moody, or emotionally shut down."
+        )
+
+    def normalize_reference_image_paths(self, value):
+        if not value:
+            return []
+        if isinstance(value, (list, tuple)):
+            raw_values = value
+        else:
+            raw_values = str(value).split(",")
+        normalized = []
+        seen = set()
+        for raw in raw_values:
+            text = str(raw).strip()
+            if not text:
+                continue
+            path = Path(text).expanduser()
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(path)
+        return normalized
 
     def slug(self, value):
         normalized = re.sub(r"[^a-z0-9]+", "-", str(value).lower()).strip("-")

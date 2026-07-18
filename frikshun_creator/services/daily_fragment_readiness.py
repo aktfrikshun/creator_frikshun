@@ -10,8 +10,10 @@ from PIL import Image
 from ..models import Artifact, PostDraft
 from ..publishers.facebook import FacebookAdapter
 from ..publishers.instagram import InstagramAdapter
+from ..publishers.threads import ThreadsAdapter
 from ..publishers.x import XAdapter
 from ..publishers.fanvue import FanvueAdapter
+from ..services.threads_oauth import ThreadsOAuth
 
 
 @dataclass
@@ -88,6 +90,12 @@ class DailyFragmentReadinessChecker:
                     caption="Readiness probe.",
                     hashtags=["ChloeKatastrophe"],
                 ),
+                "threads": PostDraft(
+                    artifact=artifact,
+                    platform="threads",
+                    caption="Readiness probe. Which signal still feels true?",
+                    hashtags=["ChloeKatastrophe"],
+                ),
                 "x": PostDraft(
                     artifact=artifact,
                     platform="x",
@@ -117,6 +125,21 @@ class DailyFragmentReadinessChecker:
                     media_base_url=self.app.config.get("INSTAGRAM_MEDIA_BASE_URL"),
                     dry_run=self.app.config.get("INSTAGRAM_DRY_RUN"),
                 ),
+                "threads": ThreadsAdapter(
+                    access_token=self.app.config.get("THREADS_ACCESS_TOKEN"),
+                    oauth=ThreadsOAuth(
+                        app_id=self.app.config.get("THREADS_APP_ID"),
+                        app_secret=self.app.config.get("THREADS_APP_SECRET"),
+                        redirect_uri=self.app.config.get("THREADS_REDIRECT_URI"),
+                        token_path=self.app.config.get("THREADS_TOKEN_PATH"),
+                        auth_url=self.app.config.get("THREADS_AUTH_URL"),
+                        api_base_url=self.app.config.get("THREADS_API_BASE_URL"),
+                    ),
+                    api_version=self.app.config.get("THREADS_API_VERSION"),
+                    base_url=self.app.config.get("THREADS_API_BASE_URL"),
+                    media_base_url=self.app.config.get("THREADS_MEDIA_BASE_URL"),
+                    dry_run=self.app.config.get("THREADS_DRY_RUN"),
+                ),
                 "x": XAdapter(
                     consumer_key=self.app.config.get("X_CONSUMER_KEY"),
                     consumer_secret=self.app.config.get("X_SECRET_KEY"),
@@ -134,7 +157,7 @@ class DailyFragmentReadinessChecker:
             }
 
             checks = []
-            for platform in ("facebook", "instagram", "x", "fanvue"):
+            for platform in ("facebook", "instagram", "threads", "x", "fanvue"):
                 validation = adapters[platform].validate(drafts[platform])
                 ok = bool(validation.success and validation.status == "validated")
                 detail = "validated" if ok else str(validation.error_message or validation.status)
@@ -142,6 +165,7 @@ class DailyFragmentReadinessChecker:
 
             checks.append(self.check_facebook_remote())
             checks.append(self.check_instagram_remote())
+            checks.append(self.check_threads_remote(adapters["threads"]))
             checks.append(self.check_x_remote(adapters["x"]))
             return checks
 
@@ -208,3 +232,18 @@ class DailyFragmentReadinessChecker:
             return ReadinessCheck("x_remote", False, "X identity response did not include a user id.")
         except (requests.RequestException, ValueError) as error:
             return ReadinessCheck("x_remote", False, str(error))
+
+    def check_threads_remote(self, adapter):
+        if self.app.config.get("THREADS_DRY_RUN"):
+            return ReadinessCheck("threads_remote", False, "THREADS_DRY_RUN must be false.")
+        try:
+            payload = adapter.verify_identity()
+            if payload.get("id"):
+                return ReadinessCheck(
+                    "threads_remote",
+                    True,
+                    f"Resolved Threads account @{payload.get('username') or payload.get('id')}.",
+                )
+            return ReadinessCheck("threads_remote", False, "Threads identity response did not include a user id.")
+        except (requests.RequestException, ValueError) as error:
+            return ReadinessCheck("threads_remote", False, str(error))

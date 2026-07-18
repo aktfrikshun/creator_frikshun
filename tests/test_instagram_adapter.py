@@ -31,7 +31,7 @@ class InstagramAdapterTest(unittest.TestCase):
 
         self.assertTrue(result.success)
         self.assertTrue(result.external_post_id.startswith("dry-run-instagram-"))
-        self.assertEqual("https://cdn.example.test/signal.jpg", result.raw_response["image_url"])
+        self.assertEqual("https://cdn.example.test/signal.jpg", result.raw_response["media_url"])
         self.assertIn("#ChloKat", result.raw_response["caption"])
 
     def test_prepare_removes_urls_and_replaces_standing_footer(self):
@@ -57,13 +57,22 @@ class InstagramAdapterTest(unittest.TestCase):
         result = InstagramAdapter(dry_run=True).publish(self.draft(public_url=""))
 
         self.assertFalse(result.success)
-        self.assertIn("public HTTPS image URL", result.error_message)
+        self.assertIn("public HTTPS media URL", result.error_message)
 
     def test_rejects_non_jpeg_artifact(self):
         result = InstagramAdapter(dry_run=True).publish(self.draft(content_type="image/png"))
 
         self.assertFalse(result.success)
         self.assertIn("JPEG", result.error_message)
+
+    def test_dry_run_returns_reel_preview_for_video(self):
+        result = InstagramAdapter(dry_run=True).publish(
+            self.draft(content_type="video/mp4", public_url="https://cdn.example.test/signal.mp4")
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual("reel", result.raw_response["publish_kind"])
+        self.assertEqual("https://cdn.example.test/signal.mp4", result.raw_response["media_url"])
 
     def test_live_publish_creates_waits_and_publishes_container(self):
         post_responses = [
@@ -93,6 +102,31 @@ class InstagramAdapterTest(unittest.TestCase):
         self.assertIn("ig_1/media_publish", post.call_args_list[1].args[0])
         self.assertEqual("container_1", post.call_args_list[1].kwargs["data"]["creation_id"])
         self.assertEqual(3, get.call_count)
+
+    def test_live_video_publish_creates_reel_container(self):
+        post_responses = [
+            self.response({"id": "container_1"}),
+            self.response({"id": "media_1"}),
+        ]
+        get_responses = [
+            self.response({"status_code": "FINISHED"}),
+            self.response({"permalink": "https://www.instagram.com/reel/example/"}),
+        ]
+
+        with patch("frikshun_creator.publishers.instagram.requests.post", side_effect=post_responses) as post:
+            with patch("frikshun_creator.publishers.instagram.requests.get", side_effect=get_responses):
+                result = InstagramAdapter(
+                    dry_run=False,
+                    user_id="ig_1",
+                    access_token="token",
+                    status_attempts=1,
+                    status_delay=0,
+                ).publish(self.draft(content_type="video/mp4", public_url="https://cdn.example.test/signal.mp4"))
+
+        self.assertTrue(result.success)
+        self.assertEqual("reel", result.raw_response["publish_kind"])
+        self.assertEqual("REELS", post.call_args_list[0].kwargs["data"]["media_type"])
+        self.assertEqual("https://cdn.example.test/signal.mp4", post.call_args_list[0].kwargs["data"]["video_url"])
 
     def test_live_api_error_returns_failed_result_with_meta_message(self):
         response = Mock()

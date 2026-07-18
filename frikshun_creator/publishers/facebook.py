@@ -80,6 +80,8 @@ class FacebookAdapter(PublisherAdapter):
 
         if self.should_publish_photo(post_draft):
             return self.publish_photo(post_draft, message)
+        if self.should_publish_video(post_draft):
+            return self.publish_video(post_draft, message)
         return self.publish_feed_post(message)
 
     def publish_feed_post(self, message):
@@ -233,6 +235,42 @@ class FacebookAdapter(PublisherAdapter):
             },
         )
 
+    def publish_video(self, post_draft, message):
+        media_path = Path(self.media_path(post_draft))
+        endpoint = f"https://graph.facebook.com/{self.graph_version}/{self.page_id}/videos"
+        with media_path.open("rb") as video_file:
+            response = requests.post(
+                endpoint,
+                data={
+                    "description": message,
+                    "access_token": self.access_token,
+                },
+                files={"source": (media_path.name, video_file, self.media_content_type(post_draft))},
+                timeout=120,
+            )
+
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {"raw_body": response.text}
+
+        if not response.ok:
+            return PublishResult(
+                success=False,
+                status="failed",
+                error_message=payload.get("error", {}).get("message", response.reason),
+                raw_response=payload,
+            )
+
+        external_post_id = str(payload.get("id") or "")
+        return PublishResult(
+            success=True,
+            status="published",
+            external_post_id=external_post_id,
+            external_url=f"https://www.facebook.com/{external_post_id}" if external_post_id else "",
+            raw_response={**payload, "publish_kind": "video"},
+        )
+
     def should_publish_photo(self, post_draft):
         media_path = self.media_path(post_draft)
         return (
@@ -241,9 +279,19 @@ class FacebookAdapter(PublisherAdapter):
             and Path(media_path).exists()
         )
 
+    def should_publish_video(self, post_draft):
+        media_path = self.media_path(post_draft)
+        return (
+            self.media_content_type(post_draft).startswith("video/")
+            and bool(media_path)
+            and Path(media_path).exists()
+        )
+
     def publish_kind(self, post_draft):
         if self.should_publish_photo(post_draft):
             return "photo"
+        if self.should_publish_video(post_draft):
+            return "video"
         return "feed"
 
     def should_fallback_to_attached_media(self, error_message):

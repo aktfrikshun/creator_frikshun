@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from ..models import PostInteraction, PostMetricSnapshot, PostPublication
-from ..publishers import FacebookAdapter, InstagramAdapter, XAdapter, FanvueAdapter
+from ..publishers import FacebookAdapter, InstagramAdapter, ThreadsAdapter, XAdapter, FanvueAdapter
 
 
 @dataclass
@@ -21,6 +21,7 @@ class PostMetricsPoller:
         self.adapters = adapters or {
             "facebook": FacebookAdapter(),
             "instagram": InstagramAdapter(),
+            "threads": ThreadsAdapter(),
             "x": XAdapter(),
             "fanvue": FanvueAdapter(),
         }

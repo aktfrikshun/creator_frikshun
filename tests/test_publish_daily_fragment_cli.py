@@ -30,6 +30,8 @@ class PublishDailyFragmentCliTest(unittest.TestCase):
                 "INSTAGRAM_DRY_RUN": False,
                 "INSTAGRAM_USER_ID": "ig_1",
                 "INSTAGRAM_ACCESS_TOKEN": "ig-token",
+                "THREADS_DRY_RUN": False,
+                "THREADS_ACCESS_TOKEN": "threads-token",
                 "X_DRY_RUN": False,
                 "X_USERNAME": "chloekatastroph",
                 "X_CONSUMER_KEY": "x-key",
@@ -91,6 +93,7 @@ class PublishDailyFragmentCliTest(unittest.TestCase):
         with patch("frikshun_creator.services.daily_fragment_workflow.S3MediaStorage.store_instagram_image", return_value=self.stored_media()) as store, \
             patch("frikshun_creator.services.daily_fragment_workflow.FacebookAdapter.publish", return_value=self.publish_result("facebook")), \
             patch("frikshun_creator.services.daily_fragment_workflow.InstagramAdapter.publish", return_value=self.publish_result("instagram")), \
+            patch("frikshun_creator.services.daily_fragment_workflow.ThreadsAdapter.publish", return_value=self.publish_result("threads")), \
             patch("frikshun_creator.services.daily_fragment_workflow.XAdapter.publish", return_value=self.publish_result("x")), \
             patch("frikshun_creator.services.daily_fragment_workflow.FanvueAdapter.publish", return_value=self.publish_result("fanvue")):
             result = self.invoke("--local-date", "2026-07-20", "--run-id", "demo-run-1")
@@ -107,6 +110,7 @@ class PublishDailyFragmentCliTest(unittest.TestCase):
         with patch("frikshun_creator.services.daily_fragment_workflow.S3MediaStorage.store_instagram_image", return_value=self.stored_media()), \
             patch("frikshun_creator.services.daily_fragment_workflow.FacebookAdapter.publish", return_value=self.publish_result("facebook")), \
             patch("frikshun_creator.services.daily_fragment_workflow.InstagramAdapter.publish", return_value=self.publish_result("instagram")), \
+            patch("frikshun_creator.services.daily_fragment_workflow.ThreadsAdapter.publish", return_value=self.publish_result("threads")), \
             patch("frikshun_creator.services.daily_fragment_workflow.XAdapter.publish", return_value=self.publish_result("x")), \
             patch("frikshun_creator.services.daily_fragment_workflow.FanvueAdapter.publish", return_value=self.publish_result("fanvue")):
             first = self.invoke("--local-date", "2026-07-20", "--run-id", "retry-run")
@@ -115,12 +119,14 @@ class PublishDailyFragmentCliTest(unittest.TestCase):
 
         facebook_publish = Mock(side_effect=AssertionError("facebook should be skipped"))
         instagram_publish = Mock(side_effect=AssertionError("instagram should be skipped"))
+        threads_publish = Mock(side_effect=AssertionError("threads should be skipped"))
         x_publish = Mock(side_effect=AssertionError("x should be skipped"))
         fanvue_publish = Mock(side_effect=AssertionError("fanvue should be skipped"))
 
         with patch("frikshun_creator.services.daily_fragment_workflow.S3MediaStorage.store_instagram_image", return_value=self.stored_media()), \
             patch("frikshun_creator.services.daily_fragment_workflow.FacebookAdapter.publish", facebook_publish), \
             patch("frikshun_creator.services.daily_fragment_workflow.InstagramAdapter.publish", instagram_publish), \
+            patch("frikshun_creator.services.daily_fragment_workflow.ThreadsAdapter.publish", threads_publish), \
             patch("frikshun_creator.services.daily_fragment_workflow.XAdapter.publish", x_publish), \
             patch("frikshun_creator.services.daily_fragment_workflow.FanvueAdapter.publish", fanvue_publish):
             second = self.invoke("--local-date", "2026-07-20", "--run-id", "retry-run")
@@ -128,10 +134,12 @@ class PublishDailyFragmentCliTest(unittest.TestCase):
         self.assertEqual(0, second.exit_code, second.output)
         self.assertEqual(0, facebook_publish.call_count)
         self.assertEqual(0, instagram_publish.call_count)
+        self.assertEqual(0, threads_publish.call_count)
         self.assertEqual(0, x_publish.call_count)
         self.assertEqual(0, fanvue_publish.call_count)
         self.assertIn("https://example.test/facebook/post-1", second.output)
         self.assertIn("https://example.test/instagram/post-1", second.output)
+        self.assertIn("https://example.test/threads/post-1", second.output)
         self.assertIn("https://example.test/x/post-1", second.output)
         self.assertIn("https://example.test/fanvue/post-1", second.output)
 
@@ -139,6 +147,7 @@ class PublishDailyFragmentCliTest(unittest.TestCase):
         with patch("frikshun_creator.services.daily_fragment_workflow.S3MediaStorage.store_instagram_image", return_value=self.stored_media()), \
             patch("frikshun_creator.services.daily_fragment_workflow.FacebookAdapter.publish", return_value=self.publish_result("facebook")), \
             patch("frikshun_creator.services.daily_fragment_workflow.InstagramAdapter.publish", return_value=self.publish_result("instagram")), \
+            patch("frikshun_creator.services.daily_fragment_workflow.ThreadsAdapter.publish", return_value=self.publish_result("threads")), \
             patch("frikshun_creator.services.daily_fragment_workflow.XAdapter.publish", return_value=self.publish_result("x")), \
             patch("frikshun_creator.services.daily_fragment_workflow.FanvueAdapter.publish", return_value=self.publish_result("fanvue")):
             first = self.invoke("--local-date", "2026-07-20", "--run-id", "run-a")

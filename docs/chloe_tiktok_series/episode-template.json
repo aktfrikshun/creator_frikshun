@@ -1,0 +1,40 @@
+{
+  "schema_version": "0.1",
+  "episode_id": "CKS-000",
+  "title": "",
+  "premise": "",
+  "canon_status": "generated_artifact",
+  "series_bible_version": "0.1",
+  "character_element_key": "chloe_element_v1",
+  "voice_key": "chloe_voice_v1",
+  "target_duration_seconds": 30,
+  "caption": "",
+  "hashtags": ["ChloeKatastrophe", "VirtualGirl", "ChloKat"],
+  "clips": [
+    {
+      "clip_id": "CKS-000-C01",
+      "beat": "cold_open",
+      "duration_seconds": 6,
+      "environment_key": "apartment_master_v1",
+      "start_frame_key": "dialogue_anchor_neutral_v1",
+      "end_frame_key": "dialogue_anchor_dry_v1",
+      "performance": "dry_half_smile",
+      "dialogue": "",
+      "camera": "vertical medium close-up, eye level, one continuous shot",
+      "physical_action": "",
+      "post_overlay": "",
+      "continuity_notes": "",
+      "provider_task_id": null,
+      "status": "planned"
+    }
+  ],
+  "review": {
+    "identity": null,
+    "voice": null,
+    "continuity": null,
+    "timing": null,
+    "canon": null,
+    "approved_by": null,
+    "approved_at": null
+  }
+}

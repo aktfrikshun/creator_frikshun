@@ -20,6 +20,8 @@ class DailyFragmentReadinessTest(unittest.TestCase):
             "INSTAGRAM_DRY_RUN": False,
             "INSTAGRAM_USER_ID": "ig_1",
             "INSTAGRAM_ACCESS_TOKEN": "ig-token",
+            "THREADS_DRY_RUN": False,
+            "THREADS_ACCESS_TOKEN": "threads-token",
             "X_DRY_RUN": False,
             "X_USERNAME": "chloekatastroph",
             "X_CONSUMER_KEY": "x-key",
@@ -45,6 +47,7 @@ class DailyFragmentReadinessTest(unittest.TestCase):
         with app.app_context(), \
             patch("frikshun_creator.services.daily_fragment_readiness.boto3.Session") as session_cls, \
             patch("frikshun_creator.services.daily_fragment_readiness.requests.get", return_value=ok_response), \
+            patch("frikshun_creator.services.daily_fragment_readiness.ThreadsAdapter.verify_identity", return_value={"id": "2", "username": "chloekatastrophe"}), \
             patch("frikshun_creator.services.daily_fragment_readiness.XAdapter.verify_identity", return_value={"data": {"id": "1", "username": "chloekatastroph"}}), \
             patch("frikshun_creator.services.fanvue_oauth.FanvueOAuth.access_token", return_value="fanvue-token"):
             session_cls.return_value.get_credentials.return_value = object()
@@ -60,6 +63,7 @@ class DailyFragmentReadinessTest(unittest.TestCase):
             app.app_context(), \
             patch("frikshun_creator.services.daily_fragment_readiness.boto3.Session") as session_cls, \
             patch("frikshun_creator.services.daily_fragment_readiness.requests.get"), \
+            patch("frikshun_creator.services.daily_fragment_readiness.ThreadsAdapter.verify_identity"), \
             patch("frikshun_creator.services.daily_fragment_readiness.XAdapter.verify_identity"), \
             patch("frikshun_creator.services.fanvue_oauth.FanvueOAuth.access_token", return_value="fanvue-token"):
             session_cls.return_value.get_credentials.return_value = object()
@@ -82,15 +86,19 @@ class DailyFragmentReadinessTest(unittest.TestCase):
         with app.app_context(), \
             patch("frikshun_creator.services.daily_fragment_readiness.boto3.Session") as session_cls, \
             patch("frikshun_creator.services.daily_fragment_readiness.requests.get", side_effect=[facebook_fail, instagram_ok]), \
+            patch("frikshun_creator.services.daily_fragment_readiness.ThreadsAdapter.verify_identity", side_effect=ValueError("Threads token invalid")), \
             patch("frikshun_creator.services.daily_fragment_readiness.XAdapter.verify_identity", side_effect=ValueError("Bad authentication data")), \
             patch("frikshun_creator.services.fanvue_oauth.FanvueOAuth.access_token", return_value="fanvue-token"):
             session_cls.return_value.get_credentials.return_value = object()
             checks = checker.run()
 
         facebook = next(check for check in checks if check.name == "facebook_remote")
+        threads_remote = next(check for check in checks if check.name == "threads_remote")
         x_remote = next(check for check in checks if check.name == "x_remote")
         self.assertFalse(facebook.ok)
         self.assertIn("oauth", facebook.detail.lower())
+        self.assertFalse(threads_remote.ok)
+        self.assertIn("invalid", threads_remote.detail.lower())
         self.assertFalse(x_remote.ok)
         self.assertIn("authentication", x_remote.detail.lower())
 

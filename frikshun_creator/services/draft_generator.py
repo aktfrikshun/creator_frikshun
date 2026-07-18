@@ -7,6 +7,7 @@ from .text import compact_tags
 PLATFORMS = (
     "facebook",
     "instagram",
+    "threads",
     "youtube",
     "tiktok",
     "x",
@@ -56,6 +57,15 @@ class ArtifactDraftGenerator:
                 ),
                 "hashtags": tags[:10] or ["ChloKat", "VirtualArtist", "RecoveredMemory"],
                 "call_to_action": "Follow the signal.",
+            },
+            "threads": {
+                "caption": (
+                    f"{title}.\n\n"
+                    f"{thought}\n\n"
+                    "I am less interested in certainty than in what survives when certainty fails."
+                ),
+                "hashtags": tags[:5] or ["ChloKat", "RecoveredMemory", "VirtualArtist"],
+                "call_to_action": "Stay with the signal.",
             },
             "youtube": {
                 "caption": (

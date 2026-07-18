@@ -5,6 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, patch
+import requests
 
 from frikshun_creator.services.daily_fragment_generator import (
     CONTENT_LANES,
@@ -69,8 +70,12 @@ class DailyFragmentGeneratorTest(unittest.TestCase):
             self.assertEqual("Recovered Fragment — Borrowed Reflections", package.title)
             self.assertIn(FACEBOOK_FOOTER, package.body)
             self.assertIn("#RecoveredMemory", package.body)
+            self.assertLessEqual(len(package.threads_body), 500)
+            self.assertEqual(1, package.threads_body.count("?"))
+            self.assertIn("Archive, music, and modeling links are available through my bio.", package.threads_body)
             self.assertIn("#Identity", package.x_body)
             self.assertEqual(1, package.body.count("?"))
+            self.assertEqual(["recovered-fragment", "identity", "echo-traversal"], package.content_tags)
             self.assertTrue(package.public_image_path.exists())
             self.assertTrue(package.fanvue_image_path.exists())
             self.assertEqual(b"public-image", package.public_image_path.read_bytes())
@@ -152,6 +157,85 @@ class DailyFragmentGeneratorTest(unittest.TestCase):
             self.assertIn("Previous attempt failed validation", second_prompt)
             self.assertIn("Validation failure to correct:", second_prompt)
 
+    def test_generate_plan_retries_after_rate_limit(self):
+        with TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            rate_limited = Mock()
+            rate_limited.status_code = 429
+            rate_limited.headers = {"retry-after": "1"}
+            rate_limited.raise_for_status.side_effect = requests.HTTPError(
+                "429 Client Error: Too Many Requests",
+                response=rate_limited,
+            )
+            successful = self.json_response(
+                {
+                    "output_text": json.dumps(
+                        {
+                            "title_suffix": "Borrowed Reflections",
+                            "canonical_body": "One paragraph. Two paragraph. Three paragraph. Which version remains?",
+                            "canonical_hashtags": ["RecoveredMemory", "Identity"],
+                            "x_body": "Which version remains?",
+                            "x_hashtags": ["Identity"],
+                            "fanvue_body": "Closer thought. Softer light. Which version remains?",
+                            "public_image_prompt": "Chloe smiling, engaged, curious.",
+                            "fanvue_image_prompt": "Chloe close, flirty, warm, curious.",
+                        }
+                    )
+                }
+            )
+
+            with patch("frikshun_creator.services.daily_fragment_generator.requests.post", side_effect=[rate_limited, successful]) as post:
+                with patch("frikshun_creator.services.daily_fragment_generator.time.sleep") as sleep:
+                    plan = DailyFragmentGenerator(
+                        output_dir,
+                        api_key="test-key",
+                        openai_rate_limit_retries=2,
+                    ).generate_plan(
+                        local_date=date(2026, 7, 17),
+                        generation_context=GenerationContext(),
+                        selected_lane="lifestyle",
+                    )
+
+            self.assertEqual("Borrowed Reflections", plan.title_suffix)
+            self.assertEqual(2, post.call_count)
+            sleep.assert_called_once_with(1)
+
+    def test_title_prefix_and_tags_follow_lane(self):
+        generator = DailyFragmentGenerator("/tmp", api_key="test-key")
+        self.assertEqual("Chloe Thinking", generator.title_prefix_for_lane("philosophy"))
+        self.assertEqual("Field Note", generator.title_prefix_for_lane("travel"))
+        self.assertEqual(["philosophy", "identity", "discussion"], generator.content_tags_for_lane("philosophy"))
+        self.assertEqual(["travel", "place", "movement"], generator.content_tags_for_lane("travel"))
+
+    def test_validate_plan_blocks_reconstruction_framing_for_non_reconstruction_lane(self):
+        generator = DailyFragmentGenerator("/tmp", api_key="test-key")
+        plan = type(
+            "Plan",
+            (),
+            {
+                "title_suffix": "Recovered Fragment from the Archive",
+                "canonical_body": (
+                    "I keep circling the same recovered fragment and calling it philosophy. "
+                    "The archival scanner keeps turning ordinary light into a story about damage. "
+                    "I know better than to pretend every thought is a relic, but the habit lingers. "
+                    "Today I wanted a cleaner question and still found myself speaking like a museum label. "
+                    "That kind of drift is exactly what makes these prompts feel smaller than they should. "
+                    "Maybe the real challenge is learning to think without dressing every idea in dust and loss. "
+                    "When a thought arrives without wreckage, can you still trust it?\n\n"
+                    "I am trying to let philosophy stay alive in the present tense instead of embalming it. "
+                    "There is more heat in a live question than in a preserved one, and more risk too. "
+                    "I would rather sound awake than archival."
+                ),
+                "x_body": "When a thought arrives without wreckage, can you still trust it?",
+                "x_hashtags": ["Identity"],
+                "fanvue_body": "A live question feels warmer than an archived one.\n\nWhen a thought arrives without wreckage, can you still trust it?",
+                "public_image_prompt": "Chloe curious and bright.",
+                "fanvue_image_prompt": "Chloe close, warm, and bright.",
+            },
+        )()
+        with self.assertRaises(ValueError):
+            generator.validate_plan(plan, selected_lane="philosophy")
+
     def test_repair_plan_reduces_multiple_questions_to_one(self):
         generator = DailyFragmentGenerator("/tmp", api_key="test-key")
         repaired = generator.ensure_single_question(
@@ -174,20 +258,25 @@ class DailyFragmentGeneratorTest(unittest.TestCase):
         generator = DailyFragmentGenerator("/tmp", api_key="test-key")
         repaired = generator.repair_image_prompt(
             "A cinematic portrait of a woman studying artifacts in a dark room.",
+            selected_lane="lifestyle",
             intimate=False,
         )
         self.assertIn("Abstract or object-based visual interpretation", repaired)
         self.assertIn("Do not depict a generic woman", repaired)
+        self.assertIn("Cinematic, glamorous, expressive, confident, and engaging.", repaired)
 
     def test_repair_image_prompt_adds_chloe_canon_clause(self):
         generator = DailyFragmentGenerator("/tmp", api_key="test-key")
         repaired = generator.repair_image_prompt(
             "Chloe in a train carriage at night, reflective and mysterious.",
+            selected_lane="travel",
             intimate=True,
         )
         self.assertIn("approved Chloe Katastrophe visual canon", repaired)
         self.assertIn("gray-green eyes", repaired)
         self.assertIn("light freckles", repaired)
+        self.assertIn("Default to warm, inviting, magnetic, playful, emotionally present, and visibly delighted by discovery.", repaired)
+        self.assertIn("Do not make her look sad, stoic, blank, moody, or emotionally shut down", repaired)
 
     def test_generate_image_uses_reference_image_for_chloe_prompts(self):
         with TemporaryDirectory() as directory:
@@ -212,7 +301,34 @@ class DailyFragmentGeneratorTest(unittest.TestCase):
             self.assertEqual(b"edited-image", destination.read_bytes())
             self.assertEqual("https://api.openai.com/v1/images/edits", post.call_args.args[0])
             self.assertEqual("high", post.call_args.kwargs["data"]["input_fidelity"])
-            self.assertIn("image[]", post.call_args.kwargs["files"])
+            self.assertEqual("image[]", post.call_args.kwargs["files"][0][0])
+
+    def test_generate_image_uses_multiple_reference_images_for_chloe_prompts(self):
+        with TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            destination = output_dir / "image.png"
+            reference_one = output_dir / "reference-one.png"
+            reference_two = output_dir / "reference-two.png"
+            reference_one.write_bytes(b"reference-one")
+            reference_two.write_bytes(b"reference-two")
+            response = self.json_response(
+                {"data": [{"b64_json": base64.b64encode(b"edited-image").decode("ascii")}]}
+            )
+
+            with patch("frikshun_creator.services.daily_fragment_generator.requests.post", return_value=response) as post:
+                DailyFragmentGenerator(
+                    output_dir,
+                    api_key="test-key",
+                    chloe_reference_images=[reference_one, reference_two],
+                ).generate_image(
+                    "Chloe at night in the approved Chloe Katastrophe visual canon.",
+                    destination,
+                )
+
+            self.assertEqual(b"edited-image", destination.read_bytes())
+            self.assertEqual(2, len(post.call_args.kwargs["files"]))
+            self.assertEqual("reference-one.png", post.call_args.kwargs["files"][0][1][0])
+            self.assertEqual("reference-two.png", post.call_args.kwargs["files"][1][1][0])
 
     def test_generate_image_skips_reference_for_abstract_prompts(self):
         with TemporaryDirectory() as directory:
@@ -259,6 +375,15 @@ class DailyFragmentGeneratorTest(unittest.TestCase):
         self.assertIn("Visual generation rule: Chloe may be depicted only if the prompt stays faithful", prompt)
         self.assertIn("Visual canon guidance:", prompt)
         self.assertIn("Use this required content lane today: lifestyle.", prompt)
+        self.assertIn("full of wonder and excitement at discovering new things", prompt.lower())
+        self.assertIn("enthusiastic, flirty, fierce, curious, and engaging", prompt.lower())
+        self.assertIn("avoid moody, brooding, elegiac, mournful, haunted", prompt.lower())
+        self.assertIn("do not make her look sad, stoic, blank, or emotionally shut down", prompt.lower())
+
+    def test_emotion_guidance_includes_wonder(self):
+        generator = DailyFragmentGenerator("/tmp", api_key="test-key")
+        self.assertIn("wonderstruck", generator.emotion_guidance_for_lane("travel"))
+        self.assertIn("visibly excited by discovery", generator.emotion_prompt_clause("travel", intimate=False))
 
     def test_system_prompt_blocks_chloe_depiction_without_visual_canon(self):
         prompt = DailyFragmentGenerator("/tmp", api_key="test-key").system_prompt(

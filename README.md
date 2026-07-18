@@ -40,7 +40,7 @@ The local interface can now:
 
 - Upload artifact media to local disk and create artifact metadata.
 - Analyze uploaded images when OpenAI vision is configured.
-- Generate drafts for Facebook, Instagram, YouTube, TikTok, X, FanVue, and the ChloKat archive.
+- Generate drafts for Facebook, Instagram, Threads, YouTube, TikTok, X, FanVue, and the ChloKat archive.
 - Post-process generated captions for grammar, paragraph breaks, first-person Chloe perspective, voice canon, and platform character limits.
 - Approve drafts.
 - Archive individual drafts or archive all unpublished drafts.
@@ -115,7 +115,7 @@ The Page access token should come from a Meta app connected to a Facebook Page y
 
 For personal profile posting, use the generated Facebook draft as manual copy/paste text. The adapter intentionally refuses automated `profile` targets.
 
-Generate one daily recovered fragment package and publish it across Facebook, Instagram, X, and FanVue in a single command:
+Generate one daily recovered fragment package and publish it across Facebook, Instagram, Threads, X, and FanVue in a single command:
 
 ```sh
 flask --app app run-daily-fragment-autopilot
@@ -158,7 +158,36 @@ flask --app app publish-daily-fragment \
   --fanvue-body "Closer FanVue post?"
 ```
 
-Use `flask --app app check-daily-fragment-readiness` first to verify that OpenAI, S3, Facebook, Instagram, X, and FanVue are all ready for a live on-demand run.
+Use `flask --app app check-daily-fragment-readiness` first to verify that OpenAI, S3, Facebook, Instagram, Threads, X, and FanVue are all ready for a live on-demand run.
+
+Generate and export a TikTok-style vertical review reel without publishing it:
+
+```sh
+flask --app app generate-tiktok-reel \
+  --concept "dating a virtual girl" \
+  --shot-count 5
+```
+
+This command imports canon, generates a short-form concept pack, creates Chloe-consistent still frames, assembles a vertical MP4 locally, writes a JSON metadata sidecar plus a review draft text file, and stores a private `tiktok` draft in the creator database for manual review.
+
+The exporter is intentionally review-first and does not publish to TikTok. The default provider is `animatic`, which exports reviewable videos from generated stills. The connected official Kling CLI can instead generate each shot as a motion clip before local FFmpeg assembly:
+
+```sh
+TIKTOK_REEL_VIDEO_PROVIDER=kling
+KLING_CLI_BIN=kling
+KLING_VIDEO_MODEL=kling-video-v3_0
+KLING_POLL_SECONDS=600
+KLING_ENABLE_AUDIO=true
+FFMPEG_BIN=ffmpeg
+```
+
+Run `kling login` once before using the Kling provider. Generation is credit-consuming and begins only when `generate-tiktok-reel` is explicitly run with the provider set to `kling`. The default `kling-video-v3_0` path supports native audio and start-frame animation; `kling-video-v3_0_turbo` is a faster single-frame alternative but should be evaluated for dialogue needs before becoming the series default.
+
+Manual intervention points for the current reel flow:
+
+- Review the exported reel before posting.
+- Review every Kling clip for Chloe identity, voice, continuity, and lip-sync drift.
+- Add or replace music manually in TikTok or your editor of choice.
 
 ## Instagram Publishing Setup
 
@@ -189,6 +218,46 @@ Instagram publishing creates a media container, waits for Meta to finish process
 
 The Instagram adapter removes all raw URLs and the Facebook-specific archive, streaming, and FanVue footer before publishing. It inserts `Archive, music, and modeling links are available through my bio.` immediately before the final hashtag block. Facebook retains the complete standing footer and links.
 
+## Threads Publishing Setup
+
+Threads uses Meta's dedicated Threads API rather than the Instagram Graph publish endpoint. The adapter currently supports text posts and single-image posts, with image delivery coming from the same public S3 URL flow already used for daily fragments.
+
+```sh
+THREADS_API_VERSION=v1.0
+THREADS_API_BASE_URL=https://graph.threads.net
+THREADS_AUTH_URL=https://threads.net/oauth/authorize
+THREADS_DRY_RUN=false
+THREADS_APP_ID=your_threads_app_id
+THREADS_APP_SECRET=your_threads_app_secret
+THREADS_REDIRECT_URI=https://your-public-host/oauth/threads/callback
+THREADS_TOKEN_PATH=instance/threads_oauth.json
+THREADS_ACCESS_TOKEN=your_threads_user_access_token
+THREADS_LONG_LIVED_ACCESS_TOKEN=your_threads_long_lived_token
+THREADS_MEDIA_BASE_URL=https://cdn.example.com/chloe-posts
+```
+
+For the daily fragment autopilot, `generated_metadata.public_media_url` is normally enough and `THREADS_MEDIA_BASE_URL` can stay blank. The adapter removes the standing raw-link footer before publishing and replaces it with `Archive, music, and modeling links are available through my bio.` so the post reads natively on Threads.
+
+To authorize the Threads account and store the long-lived token locally:
+
+1. Set `THREADS_APP_ID`, `THREADS_APP_SECRET`, and `THREADS_REDIRECT_URI`.
+2. Make sure the exact `THREADS_REDIRECT_URI` is registered in the Meta Threads use case settings.
+3. Run the web app behind that public host.
+4. Visit `/oauth/threads/start` on that same host, or print a direct authorization URL with:
+
+```sh
+flask --app app start-threads-oauth
+```
+
+5. Approve the app as the Threads account.
+6. Let Meta redirect back to `/oauth/threads/callback`.
+
+The callback stores the long-lived token JSON in `THREADS_TOKEN_PATH`. You can refresh it later with:
+
+```sh
+flask --app app refresh-threads-token
+```
+
 ## Post Metrics Polling
 
 Poll published post metrics from the UI:
@@ -203,7 +272,7 @@ Or from the command line:
 flask --app app poll-post-metrics
 ```
 
-The metrics layer is platform-neutral and currently includes Facebook, Instagram, and X adapters. Each poll stores a new snapshot in `creator_post_metric_snapshots` and imports supported comments into `creator_post_interactions` with `reply_status=pending_review`.
+The metrics layer is platform-neutral and currently includes Facebook, Instagram, Threads, and X adapters, plus FanVue. Each poll stores a new snapshot in `creator_post_metric_snapshots` and imports supported comments into `creator_post_interactions` with `reply_status=pending_review`.
 
 ## X Publishing Setup
 

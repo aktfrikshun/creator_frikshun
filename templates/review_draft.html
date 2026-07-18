@@ -230,6 +230,10 @@
                 <button type="submit" formaction="{{ url_for('creator.publish_instagram', draft_id=draft.id) }}">
                   {% if instagram_adapter.dry_run %}Dry Run Publish{% else %}Publish to Instagram{% endif %}
                 </button>
+              {% elif draft.platform == "threads" %}
+                <button type="submit" formaction="{{ url_for('creator.publish_threads', draft_id=draft.id) }}">
+                  {% if threads_adapter.dry_run %}Dry Run Publish{% else %}Publish to Threads{% endif %}
+                </button>
               {% elif draft.platform == "x" %}
                 <button type="submit" formaction="{{ url_for('creator.publish_x', draft_id=draft.id) }}">
                   {% if x_adapter.dry_run %}Dry Run Publish{% else %}Publish to X{% endif %}

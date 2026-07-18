@@ -12,7 +12,7 @@ from .base import PostInteractionData, PostMetrics, PublishResult, PublisherAdap
 
 
 class InstagramAdapter(PublisherAdapter):
-    """Publish single-image feed posts through Instagram's Graph API."""
+    """Publish image feed posts and video reels through Instagram's Graph API."""
 
     platform = "instagram"
 
@@ -70,24 +70,30 @@ class InstagramAdapter(PublisherAdapter):
         if not base_result.success:
             return base_result
 
-        if self.media_content_type(post_draft) != "image/jpeg":
+        if self.is_image_post(post_draft) and self.media_content_type(post_draft) != "image/jpeg":
             return PublishResult(
                 success=False,
                 status="failed",
-                error_message="Instagram single-image publishing requires a JPEG artifact.",
+                error_message="Instagram image publishing requires a JPEG artifact.",
+            )
+        if not self.is_image_post(post_draft) and not self.is_video_post(post_draft):
+            return PublishResult(
+                success=False,
+                status="failed",
+                error_message="Instagram publishing currently supports JPEG images and video artifacts only.",
             )
 
-        image_url = self.media_url(post_draft)
-        if not image_url:
+        media_url = self.media_url(post_draft)
+        if not media_url:
             return PublishResult(
                 success=False,
                 status="failed",
                 error_message=(
-                    "Instagram requires a public HTTPS image URL. Set public_media_url in the "
+                    "Instagram requires a public HTTPS media URL. Set public_media_url in the "
                     "artifact metadata or configure INSTAGRAM_MEDIA_BASE_URL."
                 ),
             )
-        if urlparse(image_url).scheme != "https":
+        if urlparse(media_url).scheme != "https":
             return PublishResult(
                 success=False,
                 status="failed",
@@ -111,7 +117,8 @@ class InstagramAdapter(PublisherAdapter):
             return validation
 
         caption = self.prepare(post_draft)
-        image_url = self.media_url(post_draft)
+        media_url = self.media_url(post_draft)
+        publish_kind = "reel" if self.is_video_post(post_draft) else "single_image"
         if self.dry_run:
             external_post_id = f"dry-run-instagram-{uuid4()}"
             return PublishResult(
@@ -122,14 +129,14 @@ class InstagramAdapter(PublisherAdapter):
                 raw_response={
                     "dry_run": True,
                     "user_id": self.user_id,
-                    "image_url": image_url,
+                    "media_url": media_url,
                     "caption": caption,
-                    "publish_kind": "single_image",
+                    "publish_kind": publish_kind,
                 },
             )
 
         try:
-            container = self.create_container(image_url, caption)
+            container = self.create_container(post_draft, media_url, caption)
             creation_id = str(container.get("id") or "")
             if not creation_id:
                 return self.failed_result("Instagram did not return a creation id.", container)
@@ -150,7 +157,7 @@ class InstagramAdapter(PublisherAdapter):
 
             details = self.fetch_media(media_id, fields="permalink")
         except (requests.RequestException, ValueError) as error:
-            return self.failed_result(str(error), {"publish_kind": "single_image"})
+            return self.failed_result(str(error), {"publish_kind": publish_kind})
         return PublishResult(
             success=True,
             status="published",
@@ -161,15 +168,18 @@ class InstagramAdapter(PublisherAdapter):
                 "status": status,
                 "published": published,
                 "media": details,
-                "publish_kind": "single_image",
+                "publish_kind": publish_kind,
             },
         )
 
-    def create_container(self, image_url, caption):
-        return self.graph_post(
-            f"{self.user_id}/media",
-            {"image_url": image_url, "caption": caption},
-        )
+    def create_container(self, post_draft, media_url, caption):
+        payload = {"caption": caption}
+        if self.is_video_post(post_draft):
+            payload["media_type"] = "REELS"
+            payload["video_url"] = media_url
+        else:
+            payload["image_url"] = media_url
+        return self.graph_post(f"{self.user_id}/media", payload)
 
     def publish_container(self, creation_id):
         return self.graph_post(f"{self.user_id}/media_publish", {"creation_id": creation_id})
@@ -229,6 +239,12 @@ class InstagramAdapter(PublisherAdapter):
     def media_content_type(self, post_draft):
         artifact = getattr(post_draft, "artifact", None)
         return str(getattr(artifact, "media_content_type", "") or "").lower()
+
+    def is_image_post(self, post_draft):
+        return self.media_content_type(post_draft).startswith("image/")
+
+    def is_video_post(self, post_draft):
+        return self.media_content_type(post_draft).startswith("video/")
 
     def fetch_media(self, media_id, fields):
         return self.graph_get(media_id, {"fields": fields})

@@ -1,0 +1,65 @@
+{
+  "schema_version": "0.1",
+  "series": "Chloe Katastrophe",
+  "canon_release": "Chloe Model v1",
+  "provider": "kling",
+  "assets": [
+    {
+      "key": "chloe_element_v1",
+      "type": "provider_character_element",
+      "status": "needed",
+      "provider_id": null,
+      "source_requirements": "2-4 approved Model v1 identity references or one clean multi-angle reference video",
+      "locked_traits": ["face", "eyes", "skin", "hair", "body proportions", "signature restraint"]
+    },
+    {
+      "key": "chloe_voice_v1",
+      "type": "provider_voice",
+      "status": "needed",
+      "provider_id": null,
+      "source_requirements": "approved clean voice reference with neutral, dry, remembering, and soft performance states"
+    },
+    {
+      "key": "apartment_master_v1",
+      "type": "environment_reference",
+      "status": "candidate",
+      "path": "reference_images/entrance-start-v1.png",
+      "source_requirements": "empty 9:16 apartment-studio plate plus matching medium-close dialogue composition"
+    },
+    {
+      "key": "dialogue_anchor_neutral_v1",
+      "type": "start_frame",
+      "status": "candidate",
+      "path": "reference_images/dialogue-start-v1.png",
+      "source_requirements": "Chloe seated or standing in apartment, neutral/listening, direct-camera composition"
+    },
+    {
+      "key": "dialogue_anchor_dry_v1",
+      "type": "end_frame",
+      "status": "candidate",
+      "path": "reference_images/dialogue-smirk-tail-v1.png",
+      "source_requirements": "same lens, light, wardrobe and set; dry half-smile with natural asymmetry"
+    },
+    {
+      "key": "dialogue_anchor_remembering_v1",
+      "type": "end_frame",
+      "status": "needed",
+      "path": null,
+      "source_requirements": "same setup; gaze shifts off-camera, remembering performance without visible sci-fi effects"
+    },
+    {
+      "key": "caption_style_v1",
+      "type": "postproduction_template",
+      "status": "needed",
+      "path": null,
+      "source_requirements": "safe-zone-aware 9:16 captions, episode marker, speaker emphasis, no baked provider text"
+    },
+    {
+      "key": "audio_sting_v1",
+      "type": "postproduction_audio",
+      "status": "needed",
+      "path": null,
+      "source_requirements": "brief original or licensed dry electronic-organic sting with clean dialogue space"
+    }
+  ]
+}

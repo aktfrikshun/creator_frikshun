@@ -141,6 +141,38 @@ class FacebookAdapterTest(unittest.TestCase):
         self.assertIn("message", post.call_args.kwargs["data"])
         self.assertNotIn("files", post.call_args.kwargs)
 
+    def test_publish_video_artifact_uses_videos_endpoint(self):
+        with TemporaryDirectory() as directory:
+            video_path = Path(directory) / "signal.mp4"
+            video_path.write_bytes(b"fake video bytes")
+            artifact = Artifact(
+                title="Video Signal",
+                media_path=str(video_path),
+                media_content_type="video/mp4",
+            )
+            draft = PostDraft(
+                artifact=artifact,
+                platform="facebook",
+                caption="Video post copy.",
+                hashtags=["ChloKat"],
+            )
+            response = Mock()
+            response.ok = True
+            response.json.return_value = {"id": "video_1"}
+
+            with patch("frikshun_creator.publishers.facebook.requests.post", return_value=response) as post:
+                result = FacebookAdapter(
+                    dry_run=False,
+                    page_id="page_1",
+                    access_token="token",
+                ).publish(draft)
+
+        self.assertTrue(result.success)
+        self.assertEqual("video_1", result.external_post_id)
+        self.assertIn("/videos", post.call_args.args[0])
+        self.assertIn("description", post.call_args.kwargs["data"])
+        self.assertIn("source", post.call_args.kwargs["files"])
+
     def test_fetch_post_metrics_parses_graph_payload(self):
         publication = PostPublication(
             platform="facebook",

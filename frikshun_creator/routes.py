@@ -6,7 +6,7 @@ from flask import Blueprint, current_app, flash, redirect, render_template, requ
 
 from .db import get_session
 from .models import Artifact, CanonEntry, PlatformAccount, PostDraft, PostInteraction, PostPublication
-from .publishers import FacebookAdapter, InstagramAdapter, XAdapter, FanvueAdapter
+from .publishers import FacebookAdapter, InstagramAdapter, ThreadsAdapter, XAdapter, FanvueAdapter
 from .services.canon_importer import CanonImporter
 from .services.draft_generator import ArtifactDraftGenerator, PLATFORMS
 from .services.generation_context import load_generation_context
@@ -18,6 +18,7 @@ from .services.post_preview import apply_review_form, platform_summary
 from .services.sample_artifact_importer import SampleArtifactImporter
 from .services.social_post_importer import SocialPostImporter
 from .services.text import split_tags
+from .services.threads_oauth import ThreadsOAuth
 from .services.uploads import archive_media_filename, next_fragment_code, save_artifact_file
 
 bp = Blueprint("creator", __name__)
@@ -38,6 +39,17 @@ def fanvue_adapter():
         api_version=current_app.config.get("FANVUE_API_VERSION"),
         audience=current_app.config.get("FANVUE_AUDIENCE"),
         dry_run=current_app.config.get("FANVUE_DRY_RUN"),
+    )
+
+
+def threads_oauth():
+    return ThreadsOAuth(
+        app_id=current_app.config.get("THREADS_APP_ID"),
+        app_secret=current_app.config.get("THREADS_APP_SECRET"),
+        redirect_uri=current_app.config.get("THREADS_REDIRECT_URI"),
+        token_path=current_app.config.get("THREADS_TOKEN_PATH"),
+        auth_url=current_app.config.get("THREADS_AUTH_URL"),
+        api_base_url=current_app.config.get("THREADS_API_BASE_URL"),
     )
 
 
@@ -70,6 +82,39 @@ def fanvue_oauth_callback():
         current_app.logger.error("FanVue token exchange failed: %s", error)
         return f"FanVue token exchange failed: {error}", 400
     return "FanVue authorization succeeded. You may close this tab."
+
+
+@bp.get("/oauth/threads/start")
+def threads_oauth_start():
+    try:
+        authorization_url, state = threads_oauth().begin()
+    except ValueError as error:
+        return str(error), 503
+    flask_session["threads_oauth_state"] = state
+    return redirect(authorization_url)
+
+
+@bp.get("/oauth/threads/callback")
+def threads_oauth_callback():
+    if request.args.get("error"):
+        return f"Threads authorization failed: {request.args.get('error_description') or request.args['error']}", 400
+    state = request.args.get("state", "")
+    expected_state = flask_session.pop("threads_oauth_state", "") or threads_oauth().pop_state()
+    if not state or not secrets_compare(state, expected_state):
+        return "Threads authorization failed: invalid OAuth state.", 400
+    code = request.args.get("code", "")
+    if not code:
+        return "Threads authorization failed: missing authorization code.", 400
+    try:
+        saved = threads_oauth().exchange(code)
+    except (requests.RequestException, ValueError) as error:
+        current_app.logger.error("Threads token exchange failed: %s", error)
+        return f"Threads token exchange failed: {error}", 400
+    return (
+        "Threads authorization succeeded. "
+        f"User {saved.get('user_id') or 'unknown'} is connected and the long-lived token was stored. "
+        "You may close this tab."
+    )
 
 
 def secrets_compare(left, right):
@@ -110,6 +155,17 @@ def x_adapter():
     )
 
 
+def threads_adapter():
+    return ThreadsAdapter(
+        access_token=current_app.config.get("THREADS_ACCESS_TOKEN"),
+        oauth=threads_oauth(),
+        api_version=current_app.config.get("THREADS_API_VERSION"),
+        base_url=current_app.config.get("THREADS_API_BASE_URL"),
+        media_base_url=current_app.config.get("THREADS_MEDIA_BASE_URL"),
+        dry_run=current_app.config.get("THREADS_DRY_RUN"),
+    )
+
+
 @bp.get("/")
 def index():
     session = get_session()
@@ -131,6 +187,7 @@ def index():
     canon_count = session.query(CanonEntry).count()
     facebook = facebook_adapter()
     instagram = instagram_adapter()
+    threads = threads_adapter()
     x_publisher = x_adapter()
     fanvue = fanvue_adapter()
     return render_template(
@@ -145,6 +202,11 @@ def index():
                 "dry run"
                 if instagram.dry_run
                 else ("live" if instagram.user_id and instagram.access_token else "credentials missing")
+            ),
+            "threads": (
+                "dry run"
+                if threads.dry_run
+                else ("live" if threads.current_access_token() else "credentials missing")
             ),
             "x": (
                 "dry run"
@@ -285,6 +347,7 @@ def review_draft(draft_id):
         preview=preview,
         facebook_adapter=facebook_adapter(),
         instagram_adapter=instagram_adapter(),
+        threads_adapter=threads_adapter(),
         x_adapter=x_adapter(),
         fanvue_adapter=fanvue_adapter(),
     )
@@ -322,6 +385,7 @@ def poll_metrics():
         adapters={
             "facebook": facebook_adapter(),
             "instagram": instagram_adapter(),
+            "threads": threads_adapter(),
             "x": x_adapter(),
             "fanvue": fanvue_adapter(),
         },
@@ -465,6 +529,29 @@ def publish_x(draft_id):
     ))
     session.commit()
     flash(f"X {result.status}." if result.success else (result.error_message or "X publish failed."),
+          "success" if result.success else "error")
+    return redirect(url_for("creator.review_draft", draft_id=draft.id))
+
+
+@bp.post("/drafts/<int:draft_id>/publish/threads")
+def publish_threads(draft_id):
+    session = get_session()
+    draft = session.get(PostDraft, draft_id)
+    if not draft:
+        return redirect(url_for("creator.index"))
+    apply_review_form(draft, request.form)
+    draft.updated_at = datetime.now(timezone.utc)
+    result = threads_adapter().publish(draft)
+    draft.status = result.status
+    if result.success:
+        draft.approved_at = datetime.now(timezone.utc)
+    session.add(PostPublication(
+        post_draft_id=draft.id, platform="threads", status=result.status,
+        external_post_id=result.external_post_id, external_url=result.external_url,
+        error_message=result.error_message, raw_response=result.raw_response,
+    ))
+    session.commit()
+    flash(f"Threads {result.status}." if result.success else (result.error_message or "Threads publish failed."),
           "success" if result.success else "error")
     return redirect(url_for("creator.review_draft", draft_id=draft.id))
 

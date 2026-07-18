@@ -4,6 +4,7 @@ from .text import split_tags
 PLATFORM_LABELS = {
     "facebook": "Facebook Page",
     "instagram": "Instagram",
+    "threads": "Threads",
     "youtube": "YouTube",
     "tiktok": "TikTok",
     "x": "X",
@@ -40,6 +41,10 @@ def platform_summary(draft):
         "instagram": (
             "Instagram draft: visual, concise, and atmospheric. It should feel native to "
             "a post or carousel caption without overexplaining the canon."
+        ),
+        "threads": (
+            "Threads draft: conversational and idea-forward, with enough atmosphere to feel "
+            "personal without collapsing into a generic status update."
         ),
         "youtube": (
             "YouTube draft: search-friendly and context-rich, suitable for Shorts, "

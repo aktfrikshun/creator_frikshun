@@ -16,11 +16,12 @@ class ArtifactDraftGeneratorTest(unittest.TestCase):
 
         drafts = ArtifactDraftGenerator(artifact).generate()
 
-        self.assertEqual(7, len(drafts))
+        self.assertEqual(8, len(drafts))
         self.assertEqual(
             {
                 "facebook",
                 "instagram",
+                "threads",
                 "youtube",
                 "tiktok",
                 "x",
