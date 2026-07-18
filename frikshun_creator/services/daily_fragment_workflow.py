@@ -24,6 +24,7 @@ class DailyFragmentPackage:
     fanvue_image_path: Path
     threads_body: str = ""
     content_tags: list[str] = field(default_factory=lambda: ["recovered-fragment", "identity", "echo-traversal"])
+    generation_warnings: list[str] = field(default_factory=list)
 
 
 def default_daily_fragment_run_id(now=None):
@@ -52,6 +53,7 @@ def package_from_existing_artifact(artifact):
         fanvue_image_path=fanvue_image_path,
         threads_body=str(drafts.get("threads").caption if drafts.get("threads") else "").strip(),
         content_tags=list(artifact.content_tags or []),
+        generation_warnings=list(metadata.get("generation_warnings") or []),
     )
 
 
@@ -74,6 +76,7 @@ def store_daily_fragment_package(session, package, local_date, run_id=None):
             "run_id": run_id,
             "local_date": local_date.isoformat(),
             "fanvue_media_path": str(fanvue_image_path.resolve()),
+            "generation_warnings": list(package.generation_warnings or []),
         }
     )
     if artifact is None:
@@ -129,7 +132,13 @@ def store_daily_fragment_package(session, package, local_date, run_id=None):
 
 
 def publish_daily_fragment_package(session, config, package, local_date, run_id=None, allow_dry_run=False):
-    facebook = FacebookAdapter()
+    facebook = FacebookAdapter(
+        page_id=config.get("FACEBOOK_PAGE_ID"),
+        access_token=config.get("FACEBOOK_PAGE_ACCESS_TOKEN"),
+        graph_version=config.get("FACEBOOK_GRAPH_VERSION"),
+        dry_run=config.get("FACEBOOK_DRY_RUN"),
+        target_type=config.get("FACEBOOK_TARGET_TYPE"),
+    )
     instagram = InstagramAdapter(
         user_id=config.get("INSTAGRAM_USER_ID"),
         access_token=config.get("INSTAGRAM_ACCESS_TOKEN"),
@@ -172,7 +181,14 @@ def publish_daily_fragment_package(session, config, package, local_date, run_id=
         audience=config.get("FANVUE_AUDIENCE"),
         dry_run=config.get("FANVUE_DRY_RUN"),
     )
-    if (facebook.dry_run or instagram.dry_run or threads.dry_run or x_publisher.dry_run or fanvue.dry_run) and not allow_dry_run:
+    adapters = (
+        ("facebook", facebook),
+        ("instagram", instagram),
+        ("threads", threads),
+        ("x", x_publisher),
+        ("fanvue", fanvue),
+    )
+    if any(adapter.dry_run for _platform, adapter in adapters) and not allow_dry_run:
         raise ValueError("Facebook, Instagram, Threads, X, and FanVue must all be configured for live publishing.")
 
     artifact, run_id = store_daily_fragment_package(session, package, local_date, run_id=run_id)
@@ -188,7 +204,6 @@ def publish_daily_fragment_package(session, config, package, local_date, run_id=
         local_day=local_date,
         output_dir=config.get("UPLOAD_FOLDER"),
     )
-
     metadata = dict((artifact.generated_metadata if artifact else {}) or {})
     metadata.update(
         {
@@ -205,21 +220,12 @@ def publish_daily_fragment_package(session, config, package, local_date, run_id=
     artifact.media_content_type = stored.content_type
     artifact.media_size = stored.local_path.stat().st_size
     artifact.generated_metadata = metadata
-    artifact.platform_tags = ["facebook", "instagram", "threads", "x", "fanvue"]
-    session.flush()
-
-    drafts = {draft.platform: draft for draft in artifact.post_drafts}
     session.commit()
+    drafts = {draft.platform: draft for draft in artifact.post_drafts}
 
     urls = []
     errors = []
-    for platform, adapter in (
-        ("facebook", facebook),
-        ("instagram", instagram),
-        ("threads", threads),
-        ("x", x_publisher),
-        ("fanvue", fanvue),
-    ):
+    for platform, adapter in adapters:
         draft = drafts[platform]
         already_published = any(
             publication.status == "published" and publication.external_post_id

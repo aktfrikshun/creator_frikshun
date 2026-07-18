@@ -3,6 +3,8 @@ from tempfile import TemporaryDirectory
 import unittest
 from urllib.parse import urlparse
 from unittest.mock import patch
+from zipfile import ZipFile
+from pathlib import Path
 
 from frikshun_creator import create_app
 from frikshun_creator.db import get_session
@@ -29,6 +31,56 @@ class RoutesTest(unittest.TestCase):
 
     def tearDown(self):
         self.uploads.cleanup()
+
+    def test_daily_fragment_manual_posting_kit_downloads_images_and_platform_captions(self):
+        public_path = Path(self.uploads.name) / "public.png"
+        fanvue_path = Path(self.uploads.name) / "fanvue.png"
+        public_path.write_bytes(b"public-image")
+        fanvue_path.write_bytes(b"fanvue-image")
+        with self.app.app_context():
+            session = get_session()
+            artifact = Artifact(
+                title="Recovered Fragment — Manual Signal",
+                fragment_code="daily-fragment-run-manual-signal",
+                media_path=str(public_path),
+                media_content_type="image/png",
+                generated_metadata={
+                    "run_id": "manual-signal",
+                    "local_date": "2026-07-18",
+                    "fanvue_media_path": str(fanvue_path),
+                },
+            )
+            session.add(artifact)
+            for platform, caption in {
+                "facebook": "Facebook body.\n\nLearn more about me in the FrikShun archives: https://example.test",
+                "instagram": "Instagram body.\n\nLearn more about me in the FrikShun archives: https://example.test",
+                "threads": "Threads body?",
+                "x": "X body?",
+                "fanvue": "FanVue body?",
+            }.items():
+                session.add(PostDraft(artifact=artifact, platform=platform, caption=caption))
+            session.commit()
+            artifact_id = artifact.id
+
+        response = self.client.get(f"/daily-fragments/{artifact_id}/manual-posting-kit")
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("application/zip", response.mimetype)
+        with ZipFile(BytesIO(response.data)) as archive:
+            names = set(archive.namelist())
+            self.assertIn("manual-signal-image.png", names)
+            self.assertNotIn("manual-signal-fanvue.png", names)
+            captions = archive.read("manual-signal-captions.txt").decode("utf-8")
+        self.assertIn("=== FACEBOOK ===", captions)
+        self.assertIn("=== INSTAGRAM ===", captions)
+        self.assertIn("Archive, music, and modeling links are available through my bio.", captions)
+        self.assertNotIn("https://example.test", captions.split("=== INSTAGRAM ===", 1)[1].split("=== THREADS ===", 1)[0])
+        response.close()
+
+        response = self.client.get(f"/daily-fragments/{artifact_id}/media/public?download=1")
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(b"public-image", response.data)
+        response.close()
 
     def test_create_artifact_generates_drafts_and_facebook_dry_run_publishes(self):
         response = self.client.post(
@@ -367,7 +419,7 @@ class RoutesTest(unittest.TestCase):
 
         response = self.client.post(f"/drafts/{facebook.id}/archive", follow_redirects=True)
         self.assertEqual(200, response.status_code)
-        self.assertNotIn(b"facebook", response.data)
+        self.assertNotIn(f'/drafts/{facebook.id}'.encode(), response.data)
 
         self.client.post(
             "/artifacts",
@@ -386,6 +438,98 @@ class RoutesTest(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         self.assertIn(b"Archived 15 unpublished drafts.", response.data)
         self.assertNotIn(b"Second Cleanup Signal", response.data)
+
+    def test_post_library_searches_caption_and_filters_platform_and_status(self):
+        with self.app.app_context():
+            session = get_session()
+            artifact = Artifact(title="Powder Signal", summary="A quiet room.")
+            session.add(artifact)
+            session.add(PostDraft(artifact=artifact, platform="x", status="published", caption="A hidden violet phrase."))
+            session.commit()
+
+        response = self.client.get("/?q=violet&platform=x&status=published")
+
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"Powder Signal", response.data)
+        self.assertIn(b"1 post found", response.data)
+
+    def test_post_library_filters_by_post_family(self):
+        with self.app.app_context():
+            session = get_session()
+            recovered = Artifact(
+                title="Recovered Fragment — Family Signal",
+                fragment_code="daily-fragment-run-recovered-family",
+                content_tags=["recovered-fragment", "identity"],
+            )
+            philosophy = Artifact(
+                title="Chloe Thinking — Family Signal",
+                fragment_code="daily-fragment-run-philosophy-family",
+                content_tags=["philosophy", "identity"],
+            )
+            session.add_all((recovered, philosophy))
+            session.flush()
+            session.add_all(
+                (
+                    PostDraft(artifact=recovered, platform="x", caption="Recovered"),
+                    PostDraft(artifact=philosophy, platform="x", caption="Philosophy"),
+                )
+            )
+            session.commit()
+
+        response = self.client.get("/?family=philosophy")
+
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"Chloe Thinking", response.data)
+        self.assertNotIn(b"Recovered Fragment", response.data)
+
+    @patch("frikshun_creator.routes.subprocess.Popen")
+    def test_generate_daily_fragment_starts_ad_hoc_cli(self, popen):
+        response = self.client.post("/daily-fragments/generate", follow_redirects=True)
+
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"automatically selected post run has started", response.data)
+        command = popen.call_args.args[0]
+        self.assertEqual("run-daily-fragment-autopilot", command[-1])
+
+    @patch("frikshun_creator.routes.subprocess.Popen")
+    def test_generate_daily_fragment_passes_selected_family(self, popen):
+        response = self.client.post(
+            "/daily-fragments/generate",
+            data={"family": "travel"},
+            follow_redirects=True,
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"travel post run has started", response.data)
+        command = popen.call_args.args[0]
+        self.assertEqual(["--family", "travel"], command[-2:])
+
+    @patch("frikshun_creator.routes.subprocess.Popen")
+    def test_publish_daily_fragment_starts_saved_run_publisher(self, popen):
+        with self.app.app_context():
+            session = get_session()
+            artifact = Artifact(
+                title="Publish Signal",
+                fragment_code="daily-fragment-run-publish-signal",
+                generated_metadata={"run_id": "publish-signal"},
+            )
+            session.add(artifact)
+            session.add(PostDraft(artifact=artifact, platform="x", caption="Publish me?"))
+            session.commit()
+            artifact_id = artifact.id
+
+        response = self.client.post(
+            f"/daily-fragments/{artifact_id}/publish",
+            follow_redirects=True,
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"Publishing to X and FanVue has started", response.data)
+        command = popen.call_args.args[0]
+        self.assertEqual(
+            ["publish-daily-fragment-run", "--run-id", "publish-signal"],
+            command[-3:],
+        )
 
     def test_metrics_dashboard_displays_published_post_snapshot(self):
         with self.app.app_context():

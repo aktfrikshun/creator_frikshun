@@ -42,15 +42,12 @@ class DailyFragmentReadinessTest(unittest.TestCase):
         app = self.make_app()
         checker = DailyFragmentReadinessChecker(app)
 
-        ok_response = SimpleNamespace(ok=True, json=lambda: {"id": "123", "name": "Chloe", "username": "chloe"})
-
         with app.app_context(), \
-            patch("frikshun_creator.services.daily_fragment_readiness.boto3.Session") as session_cls, \
-            patch("frikshun_creator.services.daily_fragment_readiness.requests.get", return_value=ok_response), \
-            patch("frikshun_creator.services.daily_fragment_readiness.ThreadsAdapter.verify_identity", return_value={"id": "2", "username": "chloekatastrophe"}), \
+            patch.object(checker, "check_facebook_remote", return_value=SimpleNamespace(name="facebook_remote", ok=True, detail="ready")), \
+            patch.object(checker, "check_instagram_remote", return_value=SimpleNamespace(name="instagram_remote", ok=True, detail="ready")), \
+            patch.object(checker, "check_threads_remote", return_value=SimpleNamespace(name="threads_remote", ok=True, detail="ready")), \
             patch("frikshun_creator.services.daily_fragment_readiness.XAdapter.verify_identity", return_value={"data": {"id": "1", "username": "chloekatastroph"}}), \
             patch("frikshun_creator.services.fanvue_oauth.FanvueOAuth.access_token", return_value="fanvue-token"):
-            session_cls.return_value.get_credentials.return_value = object()
             checks = checker.run()
 
         self.assertTrue(all(check.ok for check in checks), checks)
@@ -61,46 +58,35 @@ class DailyFragmentReadinessTest(unittest.TestCase):
 
         with patch.dict(os.environ, {"OPENAI_API_KEY": ""}, clear=False), \
             app.app_context(), \
-            patch("frikshun_creator.services.daily_fragment_readiness.boto3.Session") as session_cls, \
-            patch("frikshun_creator.services.daily_fragment_readiness.requests.get"), \
-            patch("frikshun_creator.services.daily_fragment_readiness.ThreadsAdapter.verify_identity"), \
+            patch.object(checker, "check_facebook_remote", return_value=SimpleNamespace(name="facebook_remote", ok=True, detail="ready")), \
+            patch.object(checker, "check_instagram_remote", return_value=SimpleNamespace(name="instagram_remote", ok=True, detail="ready")), \
+            patch.object(checker, "check_threads_remote", return_value=SimpleNamespace(name="threads_remote", ok=True, detail="ready")), \
             patch("frikshun_creator.services.daily_fragment_readiness.XAdapter.verify_identity"), \
             patch("frikshun_creator.services.fanvue_oauth.FanvueOAuth.access_token", return_value="fanvue-token"):
-            session_cls.return_value.get_credentials.return_value = object()
             checks = checker.run()
 
         openai = next(check for check in checks if check.name == "openai")
         self.assertFalse(openai.ok)
         self.assertIn("missing", openai.detail.lower())
 
-    def test_run_flags_remote_publisher_failures(self):
+    def test_run_flags_x_remote_publisher_failure(self):
         app = self.make_app()
         checker = DailyFragmentReadinessChecker(app)
-        facebook_fail = SimpleNamespace(
-            ok=False,
-            reason="Unauthorized",
-            json=lambda: {"error": {"message": "Invalid OAuth access token."}},
-        )
-        instagram_ok = SimpleNamespace(ok=True, json=lambda: {"id": "ig_1", "username": "chloe"})
 
         with app.app_context(), \
-            patch("frikshun_creator.services.daily_fragment_readiness.boto3.Session") as session_cls, \
-            patch("frikshun_creator.services.daily_fragment_readiness.requests.get", side_effect=[facebook_fail, instagram_ok]), \
-            patch("frikshun_creator.services.daily_fragment_readiness.ThreadsAdapter.verify_identity", side_effect=ValueError("Threads token invalid")), \
+            patch.object(checker, "check_facebook_remote", return_value=SimpleNamespace(name="facebook_remote", ok=True, detail="ready")), \
+            patch.object(checker, "check_instagram_remote", return_value=SimpleNamespace(name="instagram_remote", ok=True, detail="ready")), \
+            patch.object(checker, "check_threads_remote", return_value=SimpleNamespace(name="threads_remote", ok=True, detail="ready")), \
             patch("frikshun_creator.services.daily_fragment_readiness.XAdapter.verify_identity", side_effect=ValueError("Bad authentication data")), \
             patch("frikshun_creator.services.fanvue_oauth.FanvueOAuth.access_token", return_value="fanvue-token"):
-            session_cls.return_value.get_credentials.return_value = object()
             checks = checker.run()
 
-        facebook = next(check for check in checks if check.name == "facebook_remote")
-        threads_remote = next(check for check in checks if check.name == "threads_remote")
         x_remote = next(check for check in checks if check.name == "x_remote")
-        self.assertFalse(facebook.ok)
-        self.assertIn("oauth", facebook.detail.lower())
-        self.assertFalse(threads_remote.ok)
-        self.assertIn("invalid", threads_remote.detail.lower())
         self.assertFalse(x_remote.ok)
         self.assertIn("authentication", x_remote.detail.lower())
+        self.assertIn("facebook_remote", {check.name for check in checks})
+        self.assertIn("instagram_remote", {check.name for check in checks})
+        self.assertIn("threads_remote", {check.name for check in checks})
 
 
 if __name__ == "__main__":

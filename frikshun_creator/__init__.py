@@ -16,7 +16,7 @@ from .publishers.x import XAdapter
 from .publishers.fanvue import FanvueAdapter
 from .routes import bp
 from .services.canon_importer import CanonImporter
-from .services.daily_fragment_generator import DailyFragmentGenerator
+from .services.daily_fragment_generator import CONTENT_LANES, DailyFragmentGenerator
 from .services.daily_fragment_readiness import DailyFragmentReadinessChecker
 from .services.daily_fragment_workflow import (
     DailyFragmentPackage,
@@ -227,8 +227,9 @@ def create_app(config_overrides=None):
     @click.option(
         "--fanvue-image",
         type=click.Path(exists=True, dir_okay=False, path_type=Path),
-        required=True,
-        help="Separate beautiful, artsy, intimate image for FanVue.",
+        required=False,
+        default=None,
+        help="Deprecated optional FanVue-specific image. The public image is used by default.",
     )
     @click.option(
         "--local-date",
@@ -254,7 +255,7 @@ def create_app(config_overrides=None):
             x_body=x_body or body,
             fanvue_body=fanvue_body or body,
             public_image_path=image,
-            fanvue_image_path=fanvue_image,
+            fanvue_image_path=fanvue_image or image,
         )
         _, run_id, urls, errors = publish_daily_fragment_package(
             session, app.config, package, local_date, run_id=run_id, allow_dry_run=allow_dry_run
@@ -277,8 +278,14 @@ def create_app(config_overrides=None):
         default="",
         help="Optional logical run id. Reuse it only when retrying the same run.",
     )
+    @click.option(
+        "--family",
+        type=click.Choice([name for name, _description in CONTENT_LANES]),
+        default=None,
+        help="Require a specific editorial family instead of using the automatic rotation.",
+    )
     @click.option("--allow-dry-run", is_flag=True, help="Record a dry run instead of refusing it.")
-    def run_daily_fragment_autopilot_command(local_date, run_id, allow_dry_run):
+    def run_daily_fragment_autopilot_command(local_date, run_id, family, allow_dry_run):
         """Generate one Chloe daily fragment package and publish it to all live platforms."""
         from .db import get_session
         from .services.generation_context import load_generation_context
@@ -296,7 +303,11 @@ def create_app(config_overrides=None):
                 openai_rate_limit_max_sleep_seconds=app.config.get("OPENAI_RATE_LIMIT_MAX_SLEEP_SECONDS", 60),
             )
             try:
-                package = generator.generate(local_date, load_generation_context(session))
+                package = generator.generate(
+                    local_date,
+                    load_generation_context(session),
+                    selected_lane=family,
+                )
             except requests.HTTPError as error:
                 response = getattr(error, "response", None)
                 if response is not None and response.status_code == 429:
@@ -330,7 +341,13 @@ def create_app(config_overrides=None):
         default="",
         help="Optional logical run id. Reuse it only when regenerating or inspecting the same saved run.",
     )
-    def generate_daily_fragment_run_command(local_date, run_id):
+    @click.option(
+        "--family",
+        type=click.Choice([name for name, _description in CONTENT_LANES]),
+        default=None,
+        help="Require a specific editorial family instead of using the automatic rotation.",
+    )
+    def generate_daily_fragment_run_command(local_date, run_id, family):
         """Generate one Chloe daily fragment package and save it locally without publishing."""
         from .db import get_session
         from .services.generation_context import load_generation_context
@@ -355,7 +372,11 @@ def create_app(config_overrides=None):
             openai_rate_limit_max_sleep_seconds=app.config.get("OPENAI_RATE_LIMIT_MAX_SLEEP_SECONDS", 60),
         )
         try:
-            package = generator.generate(local_date, load_generation_context(session))
+            package = generator.generate(
+                local_date,
+                load_generation_context(session),
+                selected_lane=family,
+            )
         except requests.HTTPError as error:
             response = getattr(error, "response", None)
             if response is not None and response.status_code == 429:

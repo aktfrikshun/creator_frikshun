@@ -53,6 +53,17 @@ class RunDailyFragmentAutopilotCliTest(unittest.TestCase):
         self.assertEqual(date(2026, 7, 20), generate.call_args.args[0])
         self.assertEqual(date(2026, 7, 20), publish.call_args.args[3])
 
+    def test_command_passes_requested_family_to_generator(self):
+        with patch("frikshun_creator.CanonImporter.run"), \
+            patch("frikshun_creator.DailyFragmentGenerator.generate", return_value=self.package) as generate, \
+            patch("frikshun_creator.publish_daily_fragment_package", return_value=(None, "travel-run", [], [])):
+            result = self.runner.invoke(
+                args=["run-daily-fragment-autopilot", "--family", "travel"]
+            )
+
+        self.assertEqual(0, result.exit_code, result.output)
+        self.assertEqual("travel", generate.call_args.kwargs["selected_lane"])
+
     def test_command_reuses_existing_run_id_without_regenerating(self):
         with self.app.app_context():
             session = get_session()

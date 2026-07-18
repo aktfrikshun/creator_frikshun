@@ -55,7 +55,6 @@ class DailyFragmentGeneratorTest(unittest.TestCase):
                     }
                 ),
                 self.json_response({"data": [{"b64_json": base64.b64encode(b"public-image").decode("ascii")}]}),
-                self.json_response({"data": [{"b64_json": base64.b64encode(b"fanvue-image").decode("ascii")}]}),
             ]
 
             with patch("frikshun_creator.services.daily_fragment_generator.requests.post", side_effect=responses):
@@ -79,7 +78,8 @@ class DailyFragmentGeneratorTest(unittest.TestCase):
             self.assertTrue(package.public_image_path.exists())
             self.assertTrue(package.fanvue_image_path.exists())
             self.assertEqual(b"public-image", package.public_image_path.read_bytes())
-            self.assertEqual(b"fanvue-image", package.fanvue_image_path.read_bytes())
+            self.assertEqual(package.public_image_path, package.fanvue_image_path)
+            self.assertEqual(b"public-image", package.fanvue_image_path.read_bytes())
 
     def test_generate_retries_when_first_plan_fails_validation(self):
         with TemporaryDirectory() as directory:
@@ -140,7 +140,6 @@ class DailyFragmentGeneratorTest(unittest.TestCase):
                     }
                 ),
                 self.json_response({"data": [{"b64_json": base64.b64encode(b"public-image").decode("ascii")}]}),
-                self.json_response({"data": [{"b64_json": base64.b64encode(b"fanvue-image").decode("ascii")}]}),
             ]
 
             with patch("frikshun_creator.services.daily_fragment_generator.requests.post", side_effect=responses) as post:
@@ -152,7 +151,7 @@ class DailyFragmentGeneratorTest(unittest.TestCase):
                 ).generate(local_date=date(2026, 7, 17), generation_context=GenerationContext())
 
             self.assertEqual("Recovered Fragment — Borrowed Reflections", package.title)
-            self.assertEqual(4, post.call_count)
+            self.assertEqual(3, post.call_count)
             second_prompt = post.call_args_list[1].kwargs["json"]["input"][0]["content"][0]["text"]
             self.assertIn("Previous attempt failed validation", second_prompt)
             self.assertIn("Validation failure to correct:", second_prompt)
@@ -449,6 +448,54 @@ class DailyFragmentGeneratorTest(unittest.TestCase):
             "What habit makes you feel most like yourself when the day gets loud?",
             generator.fallback_question_for_lane("lifestyle"),
         )
+
+    def test_image_error_summary_includes_openai_details_and_request_id(self):
+        response = Mock(
+            status_code=400,
+            headers={"x-request-id": "req_debug_123"},
+        )
+        response.json.return_value = {
+            "error": {
+                "message": "Image prompt was rejected.",
+                "type": "invalid_request_error",
+                "code": "image_generation_user_error",
+                "param": "prompt",
+            }
+        }
+        error = requests.HTTPError("400 Client Error", response=response)
+
+        summary = DailyFragmentGenerator("/tmp", api_key="test-key").image_error_summary(error)
+
+        self.assertIn("HTTP 400", summary)
+        self.assertIn("Image prompt was rejected", summary)
+        self.assertIn("code=image_generation_user_error", summary)
+        self.assertIn("request_id=req_debug_123", summary)
+
+    def test_successful_image_does_not_add_fallback_warning(self):
+        with TemporaryDirectory() as directory:
+            public_path = Path(directory) / "public.png"
+            public_path.write_bytes(b"successful-image")
+            warnings = []
+
+            DailyFragmentGenerator(directory, api_key="test-key").ensure_image_fallback(
+                public_path,
+                warnings,
+            )
+
+            self.assertEqual([], warnings)
+
+    def test_missing_image_receives_neutral_fallback(self):
+        with TemporaryDirectory() as directory:
+            public_path = Path(directory) / "public.png"
+            warnings = []
+
+            DailyFragmentGenerator(directory, api_key="test-key").ensure_image_fallback(
+                public_path,
+                warnings,
+            )
+
+            self.assertTrue(public_path.is_file())
+            self.assertIn("neutral local fallback", warnings[0])
 
     def json_response(self, payload):
         response = Mock()

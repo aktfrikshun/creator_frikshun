@@ -2,12 +2,14 @@ import base64
 import json
 import os
 import re
+import sys
 import time
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 
 import requests
+from PIL import Image, ImageDraw
 
 from .daily_fragment_workflow import DailyFragmentPackage
 
@@ -182,8 +184,10 @@ class DailyFragmentGenerator:
         self.chloe_reference_images = configured_references
         self.chloe_reference_image = configured_references[0] if configured_references else None
 
-    def generate(self, local_date, generation_context):
-        selected_lane = self.select_content_lane(local_date, generation_context)
+    def generate(self, local_date, generation_context, selected_lane=None):
+        if selected_lane and selected_lane not in self.content_lane_names():
+            raise ValueError(f"Unknown daily post family: {selected_lane}")
+        selected_lane = selected_lane or self.select_content_lane(local_date, generation_context)
         feedback = ""
         last_error = None
         plan = None
@@ -206,9 +210,15 @@ class DailyFragmentGenerator:
             raise ValueError(f"Daily fragment generation failed validation after retries: {last_error}")
         slug = self.slug(plan.title_suffix) or "recovered-fragment"
         public_path = self.upload_folder / f"{local_date.isoformat()}-{slug}-public.png"
-        fanvue_path = self.upload_folder / f"{local_date.isoformat()}-{slug}-fanvue.png"
-        self.generate_image(plan.public_image_prompt, public_path)
-        self.generate_image(plan.fanvue_image_prompt, fanvue_path)
+        warnings = []
+        public_error = self.generate_image_safely(
+            plan.public_image_prompt,
+            public_path,
+            "public",
+        )
+        if public_error:
+            warnings.append(public_error)
+        self.ensure_image_fallback(public_path, warnings)
         return DailyFragmentPackage(
             title=f"{self.title_prefix_for_lane(selected_lane)} — {plan.title_suffix}",
             body=self.compose_canonical_body(plan.canonical_body, plan.canonical_hashtags),
@@ -220,9 +230,62 @@ class DailyFragmentGenerator:
             x_body=self.compose_x_body(plan.x_body, plan.x_hashtags),
             fanvue_body=plan.fanvue_body.strip(),
             public_image_path=public_path,
-            fanvue_image_path=fanvue_path,
+            fanvue_image_path=public_path,
             content_tags=self.content_tags_for_lane(selected_lane),
+            generation_warnings=warnings,
         )
+
+    def generate_image_safely(self, prompt, destination_path, variant):
+        try:
+            self.generate_image(prompt, destination_path)
+            return ""
+        except Exception as error:
+            detail = self.image_error_summary(error)
+            message = f"{variant} image generation failed: {detail}"
+            print(f"WARNING: {message}", file=sys.stderr, flush=True)
+            return message
+
+    def ensure_image_fallback(self, public_path, warnings):
+        if public_path.is_file():
+            return
+
+        self.write_neutral_fallback_image(public_path)
+        warnings.append("Image generation failed; a neutral local fallback image was used.")
+
+    def write_neutral_fallback_image(self, destination_path):
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        image = Image.new("RGB", (1024, 1024), color=(23, 20, 22))
+        draw = ImageDraw.Draw(image, "RGBA")
+        draw.ellipse((545, -210, 1175, 420), fill=(126, 40, 57, 70))
+        draw.ellipse((-260, 590, 390, 1240), fill=(72, 58, 83, 75))
+        draw.line((130, 860, 895, 160), fill=(224, 204, 190, 42), width=3)
+        image.save(destination_path, "PNG")
+
+    def image_error_summary(self, error):
+        response = getattr(error, "response", None)
+        if response is None:
+            return f"{type(error).__name__}: {error}"
+        status = getattr(response, "status_code", "unknown")
+        request_id = str((getattr(response, "headers", {}) or {}).get("x-request-id") or "").strip()
+        try:
+            payload = response.json()
+        except (TypeError, ValueError):
+            payload = {}
+        api_error = payload.get("error") if isinstance(payload, dict) else None
+        if isinstance(api_error, dict):
+            parts = [
+                f"HTTP {status}",
+                str(api_error.get("message") or error),
+            ]
+            for key in ("type", "code", "param"):
+                if api_error.get(key):
+                    parts.append(f"{key}={api_error[key]}")
+        else:
+            response_text = str(getattr(response, "text", "") or "").strip()
+            parts = [f"HTTP {status}", response_text[:1000] or str(error)]
+        if request_id:
+            parts.append(f"request_id={request_id}")
+        return "; ".join(parts)
 
     def generate_preview(self, local_date, generation_context, selected_lane):
         feedback = ""

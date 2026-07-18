@@ -79,22 +79,14 @@ class DailyFragmentReadinessChecker:
             )
             drafts = {
                 "facebook": PostDraft(
-                    artifact=artifact,
-                    platform="facebook",
-                    caption="Readiness probe.",
-                    hashtags=["ChloeKatastrophe"],
+                    artifact=artifact, platform="facebook", caption="Readiness probe.", hashtags=["ChloeKatastrophe"]
                 ),
                 "instagram": PostDraft(
-                    artifact=artifact,
-                    platform="instagram",
-                    caption="Readiness probe.",
-                    hashtags=["ChloeKatastrophe"],
+                    artifact=artifact, platform="instagram", caption="Readiness probe.", hashtags=["ChloeKatastrophe"]
                 ),
                 "threads": PostDraft(
-                    artifact=artifact,
-                    platform="threads",
-                    caption="Readiness probe. Which signal still feels true?",
-                    hashtags=["ChloeKatastrophe"],
+                    artifact=artifact, platform="threads",
+                    caption="Readiness probe. Which signal still feels true?", hashtags=["ChloeKatastrophe"]
                 ),
                 "x": PostDraft(
                     artifact=artifact,
@@ -172,50 +164,45 @@ class DailyFragmentReadinessChecker:
     def check_facebook_remote(self):
         if self.app.config.get("FACEBOOK_DRY_RUN"):
             return ReadinessCheck("facebook_remote", False, "FACEBOOK_DRY_RUN must be false.")
-        try:
-            response = requests.get(
-                f"https://graph.facebook.com/{self.app.config.get('FACEBOOK_GRAPH_VERSION')}/{self.app.config.get('FACEBOOK_PAGE_ID')}",
-                params={
-                    "fields": "id,name",
-                    "access_token": self.app.config.get("FACEBOOK_PAGE_ACCESS_TOKEN"),
-                },
-                timeout=20,
-            )
-            payload = response.json()
-            if response.ok and payload.get("id"):
-                return ReadinessCheck(
-                    "facebook_remote",
-                    True,
-                    f"Resolved Page {payload.get('name') or payload.get('id')}.",
-                )
-            message = (payload.get("error") or {}).get("message") or response.reason
-            return ReadinessCheck("facebook_remote", False, str(message))
-        except (requests.RequestException, ValueError) as error:
-            return ReadinessCheck("facebook_remote", False, str(error))
+        return self.check_meta_identity(
+            "facebook_remote",
+            self.app.config.get("FACEBOOK_GRAPH_VERSION"),
+            self.app.config.get("FACEBOOK_PAGE_ID"),
+            self.app.config.get("FACEBOOK_PAGE_ACCESS_TOKEN"),
+            "id,name",
+            "name",
+            "Page",
+        )
 
     def check_instagram_remote(self):
         if self.app.config.get("INSTAGRAM_DRY_RUN"):
             return ReadinessCheck("instagram_remote", False, "INSTAGRAM_DRY_RUN must be false.")
+        return self.check_meta_identity(
+            "instagram_remote",
+            self.app.config.get("INSTAGRAM_GRAPH_VERSION"),
+            self.app.config.get("INSTAGRAM_USER_ID"),
+            self.app.config.get("INSTAGRAM_ACCESS_TOKEN"),
+            "id,username",
+            "username",
+            "Instagram account",
+        )
+
+    def check_meta_identity(self, check_name, graph_version, account_id, access_token, fields, label_field, account_type):
         try:
             response = requests.get(
-                f"https://graph.facebook.com/{self.app.config.get('INSTAGRAM_GRAPH_VERSION')}/{self.app.config.get('INSTAGRAM_USER_ID')}",
-                params={
-                    "fields": "id,username",
-                    "access_token": self.app.config.get("INSTAGRAM_ACCESS_TOKEN"),
-                },
+                f"https://graph.facebook.com/{graph_version}/{account_id}",
+                params={"fields": fields, "access_token": access_token},
                 timeout=20,
             )
             payload = response.json()
             if response.ok and payload.get("id"):
                 return ReadinessCheck(
-                    "instagram_remote",
-                    True,
-                    f"Resolved Instagram account {payload.get('username') or payload.get('id')}.",
+                    check_name, True, f"Resolved {account_type} {payload.get(label_field) or payload.get('id')}."
                 )
             message = (payload.get("error") or {}).get("message") or response.reason
-            return ReadinessCheck("instagram_remote", False, str(message))
+            return ReadinessCheck(check_name, False, str(message))
         except (requests.RequestException, ValueError) as error:
-            return ReadinessCheck("instagram_remote", False, str(error))
+            return ReadinessCheck(check_name, False, str(error))
 
     def check_x_remote(self, adapter):
         if self.app.config.get("X_DRY_RUN"):
@@ -240,9 +227,7 @@ class DailyFragmentReadinessChecker:
             payload = adapter.verify_identity()
             if payload.get("id"):
                 return ReadinessCheck(
-                    "threads_remote",
-                    True,
-                    f"Resolved Threads account @{payload.get('username') or payload.get('id')}.",
+                    "threads_remote", True, f"Resolved Threads account @{payload.get('username') or payload.get('id')}."
                 )
             return ReadinessCheck("threads_remote", False, "Threads identity response did not include a user id.")
         except (requests.RequestException, ValueError) as error:

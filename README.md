@@ -121,7 +121,17 @@ Generate one daily recovered fragment package and publish it across Facebook, In
 flask --app app run-daily-fragment-autopilot
 ```
 
-This command generates the canonical public caption, X-native caption, FanVue caption, public image, and FanVue companion image automatically, then publishes them through the same run-based workflow used by the manual publisher.
+This command generates the canonical public caption, X-native caption, FanVue caption, and one shared square image automatically. The same image is used across every account, and all five platforms publish through their APIs.
+
+The Creator OS home page is a searchable post library. Search titles and caption text, filter by editorial family, platform, or status, and open any platform badge to review its draft. Use the family selector beside **Create today’s post** to request a recovered-fragment, philosophy, lifestyle, music, travel, or creator-craft post; leave it on automatic to continue the rotation. Each daily post provides an image download and a **Download posting kit** ZIP containing the shared image plus platform-ready Facebook, Instagram, Threads, X, and FanVue captions.
+
+The same override is available from the CLI, for example:
+
+```sh
+flask --app app run-daily-fragment-autopilot --family travel
+```
+
+Daily-post cards also provide a **Publish** action. It reuses the saved logical run and publishes only to streams that do not already have a successful external publication record. Already-published streams are skipped independently.
 
 You can run it multiple times on the same day. Each invocation gets a unique run id by default, so it does not block later scheduled runs or later manual runs on the same local date.
 
@@ -133,7 +143,7 @@ flask --app app run-daily-fragment-autopilot --run-id friday-evening-retry
 
 Use this command for the normal scheduled autopilot path. Keep `publish-daily-fragment` for cases where you already have specific text or images that need custom attention.
 
-Publish one recovered fragment and image to both Facebook and Instagram for the current local day:
+Publish one recovered fragment across all connected platforms:
 
 ```sh
 flask --app app publish-daily-fragment \
@@ -142,7 +152,7 @@ flask --app app publish-daily-fragment \
   --body "Post text"
 ```
 
-The command converts the artwork to JPEG, uploads it privately to S3, gives Instagram a short-lived signed URL, and records independent Facebook and Instagram publications. It refuses dry-run mode by default.
+The command records all platform drafts, prepares the shared image for Meta through S3, and publishes to Facebook, Instagram, Threads, X, and FanVue. It refuses dry-run mode by default.
 
 Use `--local-date` only when you want the generated copy and filenames to reflect a different local date. Use `--run-id` only when you want to retry the same logical run and preserve skip/retry behavior across platforms:
 
@@ -152,13 +162,12 @@ flask --app app publish-daily-fragment \
   --run-id friday-evening-retry \
   --title "Recovered Fragment 014" \
   --image /absolute/path/to/artwork.png \
-  --fanvue-image /absolute/path/to/fanvue-artwork.png \
   --body "Canonical post text" \
   --x-body "Compact X post?" \
   --fanvue-body "Closer FanVue post?"
 ```
 
-Use `flask --app app check-daily-fragment-readiness` first to verify that OpenAI, S3, Facebook, Instagram, Threads, X, and FanVue are all ready for a live on-demand run.
+Use `flask --app app check-daily-fragment-readiness` first to verify that OpenAI, local storage, S3, Facebook, Instagram, Threads, X, and FanVue are ready for a live on-demand run.
 
 Generate and export a TikTok-style vertical review reel without publishing it:
 
@@ -286,7 +295,7 @@ X captions are always link-free. The adapter removes raw URLs and the standing a
 
 FanVue uses OAuth 2.0 publishing, media, and insights APIs. The private app requests only `read:self`, `read:post`, `write:post`, `read:media`, `write:media`, `read:insights`, and the required `openid offline_access offline` scopes. Authorization uses HTTPS and PKCE; refreshable tokens are stored privately under `instance/`.
 
-The FanVue adapter uploads a separate local image through FanVue's multipart media API, waits for processing, and creates a free `followers-and-subscribers` post. Daily runs require `--fanvue-image` and may use `--fanvue-body`. The FanVue artwork should be a distinct, more beautiful, artsy, and intimate interpretation of the same daily subject while remaining within the approved Chloe visual canon and image-generation safety rules. Likes, comments, and comment text feed the shared metrics and interaction-review UI.
+The FanVue adapter uploads the shared local post image through FanVue's multipart media API, waits for processing, and creates a free `followers-and-subscribers` post. Daily runs may use `--fanvue-body` for closer platform-native copy. The legacy `--fanvue-image` option remains available for older custom workflows but is no longer required. Likes, comments, and comment text feed the shared metrics and interaction-review UI.
 
 The interaction queue is intentionally review-first. It is the staging area for the planned scheduled process that will fetch new comments/messages and prepare Chloe-voice replies before anything is sent.
 

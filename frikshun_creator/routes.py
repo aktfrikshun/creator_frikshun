@@ -1,8 +1,15 @@
 from datetime import datetime, timezone
+from io import BytesIO
+from pathlib import Path
+import subprocess
+import sys
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import requests
 
-from flask import Blueprint, current_app, flash, redirect, render_template, request, session as flask_session, url_for
+from flask import Blueprint, abort, current_app, flash, redirect, render_template, request, send_file, session as flask_session, url_for
+from werkzeug.utils import secure_filename
+from sqlalchemy import String, cast, or_
 
 from .db import get_session
 from .models import Artifact, CanonEntry, PlatformAccount, PostDraft, PostInteraction, PostPublication
@@ -22,6 +29,24 @@ from .services.threads_oauth import ThreadsOAuth
 from .services.uploads import archive_media_filename, next_fragment_code, save_artifact_file
 
 bp = Blueprint("creator", __name__)
+
+DAILY_POST_FAMILIES = {
+    "reconstruction": ("Recovered fragment", "recovered-fragment", "Recovered Fragment"),
+    "philosophy": ("Philosophy", "philosophy", "Chloe Thinking"),
+    "lifestyle": ("Lifestyle", "lifestyle", "Chloe Living"),
+    "music": ("Music", "music", "Studio Note"),
+    "travel": ("Travel", "travel", "Field Note"),
+    "craft": ("Creator craft", "craft", "Creator Note"),
+}
+
+
+def daily_post_family(artifact):
+    tags = set(artifact.content_tags or [])
+    title = str(artifact.title or "")
+    for key, (label, tag, prefix) in DAILY_POST_FAMILIES.items():
+        if tag in tags or title.startswith(prefix):
+            return {"key": key, "label": label}
+    return None
 
 
 def fanvue_oauth():
@@ -170,44 +195,71 @@ def threads_adapter():
 def index():
     session = get_session()
     ensure_platform_accounts(session)
-    artifacts = (
+    search = request.args.get("q", "").strip()
+    family = request.args.get("family", "").strip().lower()
+    platform = request.args.get("platform", "").strip().lower()
+    status = request.args.get("status", "").strip().lower()
+    posts_query = (
         session.query(Artifact)
         .filter(Artifact.archived.is_(False))
-        .order_by(Artifact.created_at.desc())
-        .limit(20)
-        .all()
+        .filter(Artifact.post_drafts.any(PostDraft.archived.is_(False)))
     )
-    drafts = (
-        session.query(PostDraft)
-        .filter(PostDraft.archived.is_(False))
-        .order_by(PostDraft.created_at.desc())
-        .limit(20)
-        .all()
-    )
+    if search:
+        pattern = f"%{search}%"
+        posts_query = posts_query.filter(
+            or_(
+                Artifact.title.ilike(pattern),
+                Artifact.summary.ilike(pattern),
+                Artifact.lore_text.ilike(pattern),
+                Artifact.post_drafts.any(PostDraft.caption.ilike(pattern)),
+            )
+        )
+    if family in DAILY_POST_FAMILIES:
+        _, family_tag, title_prefix = DAILY_POST_FAMILIES[family]
+        posts_query = posts_query.filter(
+            or_(
+                cast(Artifact.content_tags, String).ilike(f'%"{family_tag}"%'),
+                Artifact.title.ilike(f"{title_prefix}%"),
+            )
+        )
+    if platform:
+        posts_query = posts_query.filter(
+            Artifact.post_drafts.any(
+                (PostDraft.platform == platform) & (PostDraft.archived.is_(False))
+            )
+        )
+    if status:
+        posts_query = posts_query.filter(
+            Artifact.post_drafts.any(
+                (PostDraft.status == status) & (PostDraft.archived.is_(False))
+            )
+        )
+    post_count = posts_query.count()
+    posts = posts_query.order_by(Artifact.created_at.desc()).limit(60).all()
+    for post in posts:
+        post.daily_post_family = daily_post_family(post)
+        published_platforms = {
+            publication.platform
+            for draft in post.post_drafts
+            for publication in draft.publications
+            if publication.status == "published" and publication.external_post_id
+        }
+        post.auto_publish_complete = {"x", "fanvue"}.issubset(published_platforms)
     canon_count = session.query(CanonEntry).count()
-    facebook = facebook_adapter()
-    instagram = instagram_adapter()
-    threads = threads_adapter()
     x_publisher = x_adapter()
     fanvue = fanvue_adapter()
     return render_template(
         "index.html",
-        artifacts=artifacts,
-        drafts=drafts,
+        posts=posts,
+        post_count=post_count,
+        search=search,
+        selected_family=family,
+        daily_post_families=DAILY_POST_FAMILIES,
+        selected_platform=platform,
+        selected_status=status,
         platforms=PLATFORMS,
         canon_count=canon_count,
         publishing_status={
-            "facebook": "dry run" if facebook.dry_run else "live",
-            "instagram": (
-                "dry run"
-                if instagram.dry_run
-                else ("live" if instagram.user_id and instagram.access_token else "credentials missing")
-            ),
-            "threads": (
-                "dry run"
-                if threads.dry_run
-                else ("live" if threads.current_access_token() else "credentials missing")
-            ),
             "x": (
                 "dry run"
                 if x_publisher.dry_run
@@ -225,8 +277,133 @@ def index():
                 )
             ),
             "fanvue": "dry run" if fanvue.dry_run else "live",
-            "s3": "ready" if current_app.config.get("S3_MEDIA_BUCKET") else "not configured",
         },
+    )
+
+
+@bp.post("/daily-fragments/generate")
+def generate_daily_fragment():
+    family = request.form.get("family", "").strip().lower()
+    if family and family not in DAILY_POST_FAMILIES:
+        abort(400)
+    project_root = Path(current_app.root_path).parent
+    log_path = Path(current_app.instance_path) / "daily-fragment-adhoc.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    command = [sys.executable, "-m", "flask", "--app", "app", "run-daily-fragment-autopilot"]
+    if family:
+        command.extend(("--family", family))
+    with log_path.open("ab") as log_file:
+        subprocess.Popen(
+            command,
+            cwd=project_root,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    family_label = DAILY_POST_FAMILIES[family][0] if family else "Automatically selected"
+    flash(
+        f"Today’s {family_label.lower()} post run has started. Refresh the library in a few minutes to see it.",
+        "success",
+    )
+    return redirect(url_for("creator.index"))
+
+
+@bp.post("/daily-fragments/<int:artifact_id>/publish")
+def publish_daily_fragment(artifact_id):
+    artifact = daily_fragment_or_404(get_session(), artifact_id)
+    metadata = dict((artifact.generated_metadata or {}) or {})
+    run_id = str(metadata.get("run_id") or artifact.fragment_code.removeprefix("daily-fragment-run-")).strip()
+    if not run_id:
+        abort(400)
+    project_root = Path(current_app.root_path).parent
+    log_path = Path(current_app.instance_path) / "daily-fragment-adhoc.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("ab") as log_file:
+        subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "flask",
+                "--app",
+                "app",
+                "publish-daily-fragment-run",
+                "--run-id",
+                run_id,
+            ],
+            cwd=project_root,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    flash("Publishing to X and FanVue has started. Existing successful publications will be skipped.", "success")
+    return redirect(url_for("creator.index"))
+
+
+def daily_fragment_or_404(session, artifact_id):
+    artifact = session.get(Artifact, artifact_id)
+    if artifact is None or not str(artifact.fragment_code or "").startswith("daily-fragment-run-"):
+        abort(404)
+    return artifact
+
+
+def daily_fragment_media_path(artifact, variant):
+    metadata = dict((artifact.generated_metadata or {}) or {})
+    value = metadata.get("fanvue_media_path") if variant == "fanvue" else artifact.media_path
+    path = Path(str(value or "")).expanduser()
+    if not path.is_file():
+        abort(404)
+    return path
+
+
+@bp.get("/daily-fragments/<int:artifact_id>/media/<variant>")
+def daily_fragment_media(artifact_id, variant):
+    if variant not in {"public", "fanvue"}:
+        abort(404)
+    artifact = daily_fragment_or_404(get_session(), artifact_id)
+    path = daily_fragment_media_path(artifact, variant)
+    return send_file(
+        path,
+        as_attachment=request.args.get("download") == "1",
+        download_name=path.name,
+    )
+
+
+def manual_caption(platform, draft):
+    if platform == "instagram":
+        return InstagramAdapter(dry_run=True).prepare(draft)
+    if platform == "threads":
+        return ThreadsAdapter(dry_run=True).prepare(draft)
+    if platform == "x":
+        return XAdapter(dry_run=True).prepare(draft)
+    return draft.caption.strip()
+
+
+@bp.get("/daily-fragments/<int:artifact_id>/manual-posting-kit")
+def daily_fragment_manual_posting_kit(artifact_id):
+    artifact = daily_fragment_or_404(get_session(), artifact_id)
+    metadata = dict((artifact.generated_metadata or {}) or {})
+    run_id = str(metadata.get("run_id") or artifact.fragment_code.removeprefix("daily-fragment-run-"))
+    slug = secure_filename(run_id) or f"daily-fragment-{artifact.id}"
+    drafts = {draft.platform: draft for draft in artifact.post_drafts}
+
+    sections = [artifact.title, f"Run ID: {run_id}", f"Local date: {metadata.get('local_date') or ''}"]
+    for platform in ("facebook", "instagram", "threads", "x", "fanvue"):
+        draft = drafts.get(platform)
+        if draft is not None:
+            sections.extend(("", f"=== {platform.upper()} ===", manual_caption(platform, draft)))
+    captions = "\n".join(sections).strip() + "\n"
+
+    archive_buffer = BytesIO()
+    with ZipFile(archive_buffer, "w", ZIP_DEFLATED) as archive:
+        archive.writestr(f"{slug}-captions.txt", captions)
+        path = daily_fragment_media_path(artifact, "public")
+        archive.write(path, f"{slug}-image{path.suffix.lower()}")
+    archive_buffer.seek(0)
+    return send_file(
+        archive_buffer,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=f"{slug}-manual-posting-kit.zip",
     )
 
 
