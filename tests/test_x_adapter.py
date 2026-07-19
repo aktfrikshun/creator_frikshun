@@ -31,7 +31,7 @@ class XAdapterTest(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertIn("characters", result.error_message)
 
-    def test_prepare_removes_links_and_adds_bio_music_direction(self):
+    def test_prepare_removes_links_and_legacy_promo_copy(self):
         draft = self.draft(
             caption=(
                 "A recovered signal. What part of you survived?\n\n"
@@ -43,8 +43,8 @@ class XAdapterTest(unittest.TestCase):
         prepared = XAdapter(dry_run=True).prepare(draft)
         self.assertNotIn("https://", prepared)
         self.assertNotIn("Archive:", prepared)
-        self.assertIn("Links are in my bio.", prepared)
-        self.assertIn("Search Chloe Katastrophe on major streaming platforms.", prepared)
+        self.assertNotIn("Links are in my bio.", prepared)
+        self.assertNotIn("Search Chloe Katastrophe on major streaming platforms.", prepared)
         self.assertEqual(1, prepared.count("?"))
 
     def test_live_uploads_media_then_creates_post(self):

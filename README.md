@@ -123,7 +123,7 @@ flask --app app run-daily-fragment-autopilot
 
 This command generates the canonical public caption, X-native caption, FanVue caption, and one shared square image automatically. The same image is used across every account, and all five platforms publish through their APIs.
 
-The Creator OS home page is a searchable post library. Search titles and caption text, filter by editorial family, platform, or status, and open any platform badge to review its draft. Use the family selector beside **Create today’s post** to request a recovered-fragment, philosophy, lifestyle, music, travel, or creator-craft post; leave it on automatic to continue the rotation. Each daily post provides an image download and a **Download posting kit** ZIP containing the shared image plus platform-ready Facebook, Instagram, Threads, X, and FanVue captions.
+The Creator OS home page is a searchable post library. Search titles and caption text, filter by editorial family, platform, or status, and open any platform badge to review its draft. Use the family selector beside **Create today’s post** to request a recovered-fragment, philosophy, lifestyle, music, travel, creator-craft, or beautiful-fantasy-art post; leave it on automatic to continue the rotation. Beautiful fantasy art incorporates Chloe's recognizable likeness into a rotating fantasy, surreal, or abstract treatment—including digital concept art, painting, watercolor, charcoal, ink, collage, and mixed media—rather than limiting her to photorealistic scenes. Each daily post provides an image download and a **Download posting kit** ZIP containing the shared image plus platform-ready Facebook, Instagram, Threads, X, and FanVue captions.
 
 The same override is available from the CLI, for example:
 
@@ -225,7 +225,7 @@ AWS credentials come from the normal AWS SDK credential chain. Keep the bucket p
 
 Instagram publishing creates a media container, waits for Meta to finish processing it, publishes the container, records the resulting media ID and permalink, and makes likes, comments, and incoming comment text available to the metrics poller.
 
-The Instagram adapter removes all raw URLs and the Facebook-specific archive, streaming, and FanVue footer before publishing. It inserts `Archive, music, and modeling links are available through my bio.` immediately before the final hashtag block. Facebook retains the complete standing footer and links.
+The Instagram adapter removes raw URLs and any legacy archive, streaming, or FanVue boilerplate before publishing. Ordinary daily posts end with their natural caption and hashtags; profile links carry the standing destinations.
 
 ## Threads Publishing Setup
 
@@ -245,7 +245,7 @@ THREADS_LONG_LIVED_ACCESS_TOKEN=your_threads_long_lived_token
 THREADS_MEDIA_BASE_URL=https://cdn.example.com/chloe-posts
 ```
 
-For the daily fragment autopilot, `generated_metadata.public_media_url` is normally enough and `THREADS_MEDIA_BASE_URL` can stay blank. The adapter removes the standing raw-link footer before publishing and replaces it with `Archive, music, and modeling links are available through my bio.` so the post reads natively on Threads.
+For the daily fragment autopilot, `generated_metadata.public_media_url` is normally enough and `THREADS_MEDIA_BASE_URL` can stay blank. The adapter removes raw URLs and any legacy promotional footer so ordinary posts read natively on Threads without repetitive bio directions.
 
 To authorize the Threads account and store the long-lived token locally:
 
@@ -289,7 +289,7 @@ The X adapter uses X API v2 to upload the artifact image, create the post, and c
 
 X posts are validated against the standard 280-character limit before any media is uploaded. Use the generated X-specific draft rather than sending the longer Facebook or Instagram caption unchanged.
 
-X captions are always link-free. The adapter removes raw URLs and the standing archive, music, and FanVue footer, then adds: `Links are in my bio. Search Chloe Katastrophe on major streaming platforms.` This keeps the post native to X and avoids the substantially higher API rate for posts containing URLs.
+X captions are always link-free. The adapter removes raw URLs and any legacy archive, music, or FanVue footer. Ordinary posts do not receive replacement promotional boilerplate.
 
 ## FanVue API Setup
 

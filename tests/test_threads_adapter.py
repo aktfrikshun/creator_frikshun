@@ -51,7 +51,7 @@ class ThreadsAdapterTest(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual("VIDEO", result.raw_response["media_type"])
 
-    def test_prepare_removes_links_and_uses_bio_footer(self):
+    def test_prepare_removes_links_and_legacy_standing_footer(self):
         draft = self.draft(
             caption=(
                 "A recovered signal. Which self survives the rewrite?\n\n"
@@ -62,7 +62,7 @@ class ThreadsAdapterTest(unittest.TestCase):
         )
         prepared = ThreadsAdapter(dry_run=True).prepare(draft)
         self.assertNotIn("https://", prepared)
-        self.assertIn("links are available through my bio", prepared.lower())
+        self.assertNotIn("links are available through my bio", prepared.lower())
         self.assertEqual(1, prepared.count("?"))
 
     def test_prepare_truncates_long_text_to_threads_limit(self):
@@ -73,7 +73,7 @@ class ThreadsAdapterTest(unittest.TestCase):
         prepared = ThreadsAdapter(dry_run=True).prepare(self.draft(caption=long_caption))
         self.assertLessEqual(len(prepared), 500)
         self.assertEqual(1, prepared.count("?"))
-        self.assertIn("links are available through my bio", prepared.lower())
+        self.assertNotIn("links are available through my bio", prepared.lower())
 
     def test_live_uploads_container_then_publishes(self):
         responses = [

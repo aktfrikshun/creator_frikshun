@@ -119,7 +119,7 @@ class RoutesTest(unittest.TestCase):
             captions = archive.read("manual-signal-captions.txt").decode("utf-8")
         self.assertIn("=== FACEBOOK ===", captions)
         self.assertIn("=== INSTAGRAM ===", captions)
-        self.assertIn("Archive, music, and modeling links are available through my bio.", captions)
+        self.assertNotIn("Archive, music, and modeling links are available through my bio.", captions)
         self.assertNotIn("https://example.test", captions.split("=== INSTAGRAM ===", 1)[1].split("=== THREADS ===", 1)[0])
         response.close()
 
@@ -590,6 +590,19 @@ class RoutesTest(unittest.TestCase):
         self.assertIn(b"travel post run has started", response.data)
         command = popen.call_args.args[0]
         self.assertEqual(["--family", "travel"], command[-2:])
+
+    @patch("frikshun_creator.routes.subprocess.Popen")
+    def test_generate_daily_fragment_accepts_fantasy_art_family(self, popen):
+        response = self.client.post(
+            "/daily-fragments/generate",
+            data={"family": "fantasy_art"},
+            follow_redirects=True,
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"beautiful fantasy art post run has started", response.data)
+        command = popen.call_args.args[0]
+        self.assertEqual(["--family", "fantasy_art"], command[-2:])
 
     @patch("frikshun_creator.routes.subprocess.Popen")
     def test_publish_daily_fragment_starts_saved_run_publisher(self, popen):

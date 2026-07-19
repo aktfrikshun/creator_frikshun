@@ -34,7 +34,7 @@ class InstagramAdapterTest(unittest.TestCase):
         self.assertEqual("https://cdn.example.test/signal.jpg", result.raw_response["media_url"])
         self.assertIn("#ChloKat", result.raw_response["caption"])
 
-    def test_prepare_removes_urls_and_replaces_standing_footer(self):
+    def test_prepare_removes_urls_and_legacy_standing_footer(self):
         draft = self.draft()
         draft.caption = (
             "A recovered signal.\n\n"
@@ -50,7 +50,7 @@ class InstagramAdapterTest(unittest.TestCase):
         self.assertNotIn("http", caption)
         self.assertNotIn("FanVue", caption)
         self.assertNotIn("funds", caption)
-        self.assertIn("links are available through my bio", caption)
+        self.assertNotIn("links are available through my bio", caption)
         self.assertTrue(caption.endswith("#ChloKat"))
 
     def test_rejects_missing_public_https_url(self):

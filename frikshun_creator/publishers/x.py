@@ -17,7 +17,7 @@ class XAdapter(PublisherAdapter):
     max_text_length = 280
 
     def prepare(self, post_draft):
-        """Produce compact, link-free X copy with a profile/music direction."""
+        """Produce compact, link-free X copy without a compulsory promo footer."""
         prepared = super().prepare(post_draft)
         paragraphs = [part.strip() for part in prepared.split("\n\n") if part.strip()]
         footer_starts = (
@@ -39,7 +39,6 @@ class XAdapter(PublisherAdapter):
         hashtags = []
         while cleaned and cleaned[-1].startswith("#"):
             hashtags.insert(0, cleaned.pop())
-        cleaned.append("Links are in my bio. Search Chloe Katastrophe on major streaming platforms.")
         cleaned.extend(hashtags)
         return "\n\n".join(cleaned)
 

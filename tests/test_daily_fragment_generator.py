@@ -10,7 +10,6 @@ import requests
 from frikshun_creator.services.daily_fragment_generator import (
     CONTENT_LANES,
     DailyFragmentGenerator,
-    FACEBOOK_FOOTER,
 )
 from frikshun_creator.models import CanonEntry, PostDraft
 from frikshun_creator.services.generation_context import GenerationContext
@@ -67,11 +66,12 @@ class DailyFragmentGeneratorTest(unittest.TestCase):
                 ).generate(local_date=date(2026, 7, 20), generation_context=GenerationContext())
 
             self.assertEqual("Recovered Fragment — Borrowed Reflections", package.title)
-            self.assertIn(FACEBOOK_FOOTER, package.body)
+            self.assertNotIn("Learn more about me", package.body)
+            self.assertNotIn("FanVue", package.body)
             self.assertIn("#RecoveredMemory", package.body)
             self.assertLessEqual(len(package.threads_body), 500)
             self.assertEqual(1, package.threads_body.count("?"))
-            self.assertIn("Archive, music, and modeling links are available through my bio.", package.threads_body)
+            self.assertNotIn("links are available through my bio", package.threads_body.lower())
             self.assertIn("#Identity", package.x_body)
             self.assertEqual(1, package.body.count("?"))
             self.assertEqual(["recovered-fragment", "identity", "echo-traversal"], package.content_tags)
@@ -407,7 +407,7 @@ class DailyFragmentGeneratorTest(unittest.TestCase):
             generation_context=context,
         )
 
-        self.assertEqual("reconstruction", lane)
+        self.assertEqual("fantasy_art", lane)
         self.assertIn(lane, {name for name, _description in CONTENT_LANES})
 
     def test_classify_recent_caption_lane_detects_lifestyle(self):
@@ -437,8 +437,45 @@ class DailyFragmentGeneratorTest(unittest.TestCase):
 
         self.assertEqual(10, len(previews))
         self.assertEqual(
-            ["reconstruction", "philosophy", "lifestyle", "music", "travel", "craft", "reconstruction", "philosophy", "lifestyle", "music"],
+            ["fantasy_art", "reconstruction", "philosophy", "lifestyle", "music", "travel", "craft", "fantasy_art", "reconstruction", "philosophy"],
             selected_lanes,
+        )
+
+    def test_fantasy_art_family_requires_chloe_as_part_of_non_photographic_art(self):
+        generator = DailyFragmentGenerator("/tmp", api_key="test-key")
+        repaired = generator.repair_image_prompt(
+            "A watercolor dreamscape of floating gardens and impossible moons.",
+            selected_lane="fantasy_art",
+            intimate=False,
+        )
+
+        self.assertIn("Chloe Katastrophe's recognizable likeness incorporated into the artwork", repaired)
+        self.assertIn("part of the artwork itself", repaired)
+        self.assertIn("Do not default to photorealism", repaired)
+        self.assertTrue(generator.prompt_depicts_chloe(repaired))
+
+    def test_fantasy_art_family_accepts_minimal_multilingual_caption(self):
+        generator = DailyFragmentGenerator("/tmp", api_key="test-key")
+        plan = type(
+            "Plan",
+            (),
+            {
+                "title_suffix": "Violet Cartography",
+                "canonical_body": "Espressione artistica del giorno.",
+                "canonical_hashtags": ["ChloeKatastrophe", "FantasyArt"],
+                "x_body": "Artistic expression du jour.",
+                "x_hashtags": ["FantasyArt"],
+                "fanvue_body": "Художественное выражение дня.",
+                "public_image_prompt": "Chloe in the approved Chloe Katastrophe visual canon, painted in watercolor.",
+                "fanvue_image_prompt": "Chloe in the approved Chloe Katastrophe visual canon, rendered in charcoal.",
+            },
+        )()
+
+        generator.validate_plan(plan, selected_lane="fantasy_art")
+        self.assertEqual("Art du Jour", generator.title_prefix_for_lane("fantasy_art"))
+        self.assertEqual(
+            ["fantasy-art", "chloe", "artistic-expression"],
+            generator.content_tags_for_lane("fantasy_art"),
         )
 
     def test_fallback_question_for_lifestyle_is_not_memory_skewed(self):

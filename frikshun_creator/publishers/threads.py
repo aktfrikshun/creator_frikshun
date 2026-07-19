@@ -58,7 +58,7 @@ class ThreadsAdapter(PublisherAdapter):
         hashtags = []
         while cleaned and cleaned[-1].startswith("#"):
             hashtags.insert(0, cleaned.pop())
-        footer = "Archive, music, and modeling links are available through my bio."
+        footer = ""
         return self.fit_text_with_footer(cleaned, footer, hashtags)
 
     def validate(self, post_draft):

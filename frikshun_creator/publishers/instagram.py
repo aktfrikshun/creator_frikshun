@@ -61,7 +61,6 @@ class InstagramAdapter(PublisherAdapter):
         hashtags = []
         while cleaned and cleaned[-1].startswith("#"):
             hashtags.insert(0, cleaned.pop())
-        cleaned.append("Archive, music, and modeling links are available through my bio.")
         cleaned.extend(hashtags)
         return "\n\n".join(cleaned)
 

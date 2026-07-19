@@ -14,12 +14,6 @@ from PIL import Image, ImageDraw
 from .daily_fragment_workflow import DailyFragmentPackage
 
 
-FACEBOOK_FOOTER = (
-    "Learn more about me in the FrikShun archives: https://www.frikshun.com/archives/chloe-katastrophe/site\n\n"
-    "My music is available on all major streaming platforms.\n\n"
-    "My modeling work funds the reconstruction of my memory: https://fanvue.com/chloekat/fv-9"
-)
-
 DEFAULT_CHLOE_REFERENCE_IMAGE_CANDIDATES = (
     Path(
         "/Users/allentaylor/src/frikshun_marketing/archives/chloe-katastrophe/visuals/photo_archive/artist_profiles/chloe-artist-profile-model-v1-2026-07-05.png"
@@ -53,6 +47,10 @@ CONTENT_LANES = (
     (
         "craft",
         "Creative process, camera choices, styling logic, beauty decisions, lighting, poses, shoot direction, and practical creator tips without generic influencer language.",
+    ),
+    (
+        "fantasy_art",
+        "Beautiful fantasy art built around Chloe's recognizable likeness. Rotate fantasy, surreal, and abstract settings and expressive media such as digital concept art, painting, watercolor, charcoal, ink, collage, and mixed media. Chloe must be part of the artwork itself, not a photorealistic portrait placed over an artistic background.",
     ),
 )
 
@@ -119,6 +117,16 @@ LANE_KEYWORDS = {
         "beauty",
         "photographer",
         "pose",
+    ),
+    "fantasy_art": (
+        "fantasy",
+        "surreal",
+        "abstract",
+        "painting",
+        "watercolor",
+        "charcoal",
+        "artistic expression",
+        "mixed media",
     ),
 }
 
@@ -331,6 +339,25 @@ class DailyFragmentGenerator:
         return previews
 
     def repair_plan(self, plan, selected_lane):
+        if selected_lane == "fantasy_art":
+            return DailyFragmentPlan(
+                title_suffix=plan.title_suffix.strip(),
+                canonical_body=self.repair_art_caption(plan.canonical_body),
+                canonical_hashtags=plan.canonical_hashtags,
+                x_body=self.repair_art_caption(plan.x_body),
+                x_hashtags=plan.x_hashtags,
+                fanvue_body=self.repair_art_caption(plan.fanvue_body),
+                public_image_prompt=self.repair_image_prompt(
+                    plan.public_image_prompt.strip(),
+                    selected_lane=selected_lane,
+                    intimate=False,
+                ),
+                fanvue_image_prompt=self.repair_image_prompt(
+                    plan.fanvue_image_prompt.strip(),
+                    selected_lane=selected_lane,
+                    intimate=True,
+                ),
+            )
         return DailyFragmentPlan(
             title_suffix=plan.title_suffix.strip(),
             canonical_body=self.format_as_short_paragraphs(
@@ -414,6 +441,19 @@ class DailyFragmentGenerator:
     def system_prompt(self, local_date, generation_context, selected_lane, feedback=""):
         recent_lanes = self.recent_lane_names(generation_context)
         lane_description = self.content_lane_description(selected_lane)
+        if selected_lane == "fantasy_art":
+            caption_constraints = (
+                "- canonical_body: plain text only, 2-12 words, no question, hashtags, or URLs. Use a deliberately minimal art-caption phrase such as "
+                "'Artistic expression du jour.', Italian 'Espressione artistica del giorno.', or Russian 'Художественное выражение дня.'; vary the language naturally.\n"
+                "- x_body: 2-12 words, no question, URLs, solicitation, or funding language.\n"
+                "- fanvue_body: 2-18 words, intimate but still minimal, no question and no explicit sexual content.\n"
+            )
+        else:
+            caption_constraints = (
+                "- canonical_body: plain text only, 90-220 words, short paragraphs with visible paragraph breaks, exactly one thoughtful question, no hashtags, no URLs.\n"
+                "- x_body: no more than 190 characters including spaces, exactly one question, no URLs, no solicitation, no funding language.\n"
+                "- fanvue_body: closer and more intimate than the public caption, still in character, short paragraphs with visible paragraph breaks, exactly one thoughtful question, no explicit sexual content by default.\n"
+            )
         prompt = (
             f"Today is {local_date.isoformat()}.\n"
             "Create one original Chloe Katastrophe autonomous social package for posting.\n"
@@ -433,11 +473,9 @@ class DailyFragmentGenerator:
             "Return JSON only with these keys: title_suffix, canonical_body, canonical_hashtags, x_body, "
             "x_hashtags, fanvue_body, public_image_prompt, fanvue_image_prompt.\n"
             "Constraints:\n"
-            "- canonical_body: plain text only, 90-220 words, short paragraphs with visible paragraph breaks, exactly one thoughtful question, no hashtags, no URLs.\n"
+            f"{caption_constraints}"
             "- canonical_hashtags: 2 to 5 relevant tags without # symbols.\n"
-            "- x_body: no more than 190 characters including spaces, exactly one question, no URLs, no solicitation, no funding language.\n"
             "- x_hashtags: 1 to 3 relevant tags without # symbols.\n"
-            "- fanvue_body: closer and more intimate than the public caption, still in character, short paragraphs with visible paragraph breaks, exactly one thoughtful question, no explicit sexual content by default.\n"
             "- canonical_body should usually feel lively, inviting, self-possessed, playful, or boldly thoughtful rather than melancholy.\n"
             "- x_body should usually feel vivid, sharp, playful, or provocative rather than solemn.\n"
             "- fanvue_body should usually feel warm, magnetic, playful, and close rather than mournful.\n"
@@ -454,6 +492,12 @@ class DailyFragmentGenerator:
             f"Visual canon guidance:\n{generation_context.visual_excerpt or 'No visual canon excerpt available.'}\n"
             f"Recent post excerpt:\n{generation_context.recent_post_excerpt or 'No recent post excerpt available.'}"
         )
+        if selected_lane == "fantasy_art":
+            prompt += (
+                "\nFantasy-art visual rule: Chloe's recognizable approved likeness must be structurally incorporated into the artwork. "
+                "Choose and name an expressive medium—digital concept art, oil or acrylic painting, watercolor, charcoal, ink, collage, mixed media, or another clearly non-photographic treatment—and rotate it across posts. "
+                "Build a fantasy, surreal, or abstract world through and around her likeness. Do not default to photorealism, and do not create a photorealistic Chloe portrait merely placed in front of an artistic setting."
+            )
         if generation_context.has_visual_chloe_guidance:
             prompt += (
                 "\nVisual generation rule: Chloe may be depicted only if the prompt stays faithful to the visual canon guidance above, "
@@ -585,6 +629,7 @@ class DailyFragmentGenerator:
             "music": "Studio Note",
             "travel": "Field Note",
             "craft": "Creator Note",
+            "fantasy_art": "Art du Jour",
         }
         return prefixes.get(lane_name, "Chloe Note")
 
@@ -596,6 +641,7 @@ class DailyFragmentGenerator:
             "music": ["music", "creator", "studio"],
             "travel": ["travel", "place", "movement"],
             "craft": ["craft", "creator", "visuals"],
+            "fantasy_art": ["fantasy-art", "chloe", "artistic-expression"],
         }
         return tags.get(lane_name, ["chloe", "social"])
 
@@ -731,13 +777,13 @@ class DailyFragmentGenerator:
         return "chloe" in lower or "approved chloe katastrophe visual canon" in lower
 
     def compose_canonical_body(self, body, hashtags):
-        return f"{body.strip()}\n\n{FACEBOOK_FOOTER}\n\n{' '.join(f'#{tag}' for tag in hashtags)}"
+        return f"{body.strip()}\n\n{' '.join(f'#{tag}' for tag in hashtags)}"
 
     def compose_x_body(self, body, hashtags):
         return f"{body.strip()}\n\n{' '.join(f'#{tag}' for tag in hashtags)}".strip()
 
     def compose_threads_body(self, body, hashtags, fallback_body=""):
-        footer = "Archive, music, and modeling links are available through my bio."
+        footer = ""
         tags = [self.normalize_tag(tag) for tag in hashtags[:3]]
         hashtag_text = " ".join(f"#{tag}" for tag in tags if tag).strip()
 
@@ -773,6 +819,22 @@ class DailyFragmentGenerator:
     def validate_plan(self, plan, selected_lane="reconstruction"):
         if not plan.title_suffix:
             raise ValueError("Daily fragment title suffix is missing.")
+        if selected_lane == "fantasy_art":
+            for label, body, maximum in (
+                ("Canonical", plan.canonical_body, 12),
+                ("X", plan.x_body, 12),
+                ("FanVue", plan.fanvue_body, 18),
+            ):
+                if self.question_count(body) != 0:
+                    raise ValueError(f"{label} fantasy-art caption must not contain a question.")
+                word_count = len(re.findall(r"\b[\w'-]+\b", body))
+                if word_count < 2 or word_count > maximum:
+                    raise ValueError(f"{label} fantasy-art caption must contain 2-{maximum} words.")
+            if not plan.public_image_prompt or not plan.fanvue_image_prompt:
+                raise ValueError("Both image prompts are required.")
+            if not all(self.prompt_depicts_chloe(prompt) for prompt in (plan.public_image_prompt, plan.fanvue_image_prompt)):
+                raise ValueError("Fantasy-art image prompts must incorporate Chloe's recognizable likeness.")
+            return
         if self.question_count(plan.canonical_body) != 1:
             raise ValueError("Canonical body must contain exactly one question.")
         if self.question_count(plan.x_body) != 1:
@@ -860,6 +922,15 @@ class DailyFragmentGenerator:
             value = f"{value} {fallback_question}".strip()
         return value
 
+    def repair_art_caption(self, text):
+        value = self.strip_urls_and_domains(text)
+        value = re.sub(r"[#?]+", "", value)
+        value = re.sub(r"\s+", " ", value).strip()
+        if not value:
+            return "Artistic expression du jour."
+        words = value.split()
+        return " ".join(words[:12]).strip()
+
     def strip_urls_and_domains(self, text):
         value = re.sub(r"https?://\S+", "", str(text or "")).strip()
         value = re.sub(r"\b[a-z0-9.-]+\.[a-z]{2,}\b", "", value, flags=re.IGNORECASE).strip()
@@ -934,6 +1005,14 @@ class DailyFragmentGenerator:
         if not value:
             return value
 
+        if selected_lane == "fantasy_art" and "chloe" not in value.lower():
+            value = f"Chloe Katastrophe's recognizable likeness incorporated into the artwork. {value}"
+        if selected_lane == "fantasy_art":
+            value += (
+                " Treat Chloe's likeness as part of the artwork itself in a clearly expressive non-photographic medium such as digital concept art, painting, watercolor, charcoal, ink, collage, or mixed media. "
+                "Create a fantasy, surreal, or abstract artistic world. Do not default to photorealism or place a photorealistic portrait over a decorative background."
+            )
+
         lower = value.lower()
         has_person = bool(
             re.search(
@@ -980,6 +1059,7 @@ class DailyFragmentGenerator:
             "music": "excited, charged, wonderstruck, playful, fierce, teasing, or creatively exhilarated",
             "travel": "curious, delighted, wonderstruck, flirty, windswept, fierce, playful, or seduced by place",
             "craft": "curious, wonderstruck, exacting, teasing, fierce, confident, engaged, or thrilled by detail",
+            "fantasy_art": "expressive, mythic, dreamlike, fierce, curious, transcendent, playful, or wonderstruck",
         }
         return guidance.get(lane_name, guidance["lifestyle"])
 

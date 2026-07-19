@@ -54,6 +54,7 @@ DAILY_POST_FAMILIES = {
     "music": ("Music", "music", "Studio Note"),
     "travel": ("Travel", "travel", "Field Note"),
     "craft": ("Creator craft", "craft", "Creator Note"),
+    "fantasy_art": ("Beautiful fantasy art", "fantasy-art", "Art du Jour"),
 }
 
 PUBLIC_ENDPOINTS = {
