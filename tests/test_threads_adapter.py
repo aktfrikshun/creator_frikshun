@@ -29,6 +29,11 @@ class ThreadsAdapterTest(unittest.TestCase):
         self.assertTrue(result.external_post_id.startswith("dry-run-threads-"))
         self.assertEqual("IMAGE", result.raw_response["media_type"])
 
+    def test_saved_oauth_token_takes_precedence_over_stale_env_token(self):
+        oauth = SimpleNamespace(access_token=lambda: "fresh-oauth-token")
+        adapter = ThreadsAdapter(access_token="stale-env-token", oauth=oauth, dry_run=False)
+        self.assertEqual("fresh-oauth-token", adapter.current_access_token())
+
     def test_dry_run_publishes_video_post(self):
         artifact = SimpleNamespace(
             media_path="signal.mp4",
@@ -74,21 +79,23 @@ class ThreadsAdapterTest(unittest.TestCase):
         responses = [
             self.response({"id": "container-1"}),
             self.response({"id": "thread-1"}),
+            self.response({"status": "FINISHED"}),
             self.response({"id": "thread-1", "permalink": "https://www.threads.net/@chloe/post/thread-1"}),
         ]
         with patch("frikshun_creator.publishers.threads.requests.post", side_effect=responses[:2]) as post:
-            with patch("frikshun_creator.publishers.threads.requests.get", return_value=responses[2]) as get:
+            with patch("frikshun_creator.publishers.threads.requests.get", side_effect=responses[2:]) as get:
                 result = ThreadsAdapter(access_token="threads-token", dry_run=False).publish(self.draft())
         self.assertTrue(result.success)
         self.assertEqual("thread-1", result.external_post_id)
         self.assertEqual("https://www.threads.net/@chloe/post/thread-1", result.external_url)
         self.assertIn("/v1.0/me/threads", post.call_args_list[0].args[0])
-        self.assertIn("/v1.0/thread-1", get.call_args.args[0])
+        self.assertIn("/v1.0/thread-1", get.call_args_list[-1].args[0])
 
     def test_live_uploads_video_container_then_publishes(self):
         responses = [
             self.response({"id": "container-1"}),
             self.response({"id": "thread-1"}),
+            self.response({"status": "FINISHED"}),
             self.response({"id": "thread-1", "permalink": "https://www.threads.net/@chloe/post/thread-1"}),
         ]
         artifact = SimpleNamespace(
@@ -104,7 +111,7 @@ class ThreadsAdapterTest(unittest.TestCase):
             platform="threads",
         )
         with patch("frikshun_creator.publishers.threads.requests.post", side_effect=responses[:2]) as post:
-            with patch("frikshun_creator.publishers.threads.requests.get", return_value=responses[2]):
+            with patch("frikshun_creator.publishers.threads.requests.get", side_effect=responses[2:]):
                 result = ThreadsAdapter(access_token="threads-token", dry_run=False).publish(draft)
         self.assertTrue(result.success)
         self.assertEqual("VIDEO", post.call_args_list[0].kwargs["data"]["media_type"])
@@ -117,13 +124,50 @@ class ThreadsAdapterTest(unittest.TestCase):
         ]
         missing = self.response({"error": {"message": "The requested resource does not exist"}}, ok=False, reason="Not Found")
         with patch("frikshun_creator.publishers.threads.requests.post", side_effect=responses):
-            with patch("frikshun_creator.publishers.threads.requests.get", side_effect=[missing, missing, missing]):
+            with patch(
+                "frikshun_creator.publishers.threads.requests.get",
+                side_effect=[self.response({"status": "FINISHED"}), missing, missing, missing],
+            ):
                 with patch("frikshun_creator.publishers.threads.time.sleep"):
                     result = ThreadsAdapter(access_token="threads-token", dry_run=False).publish(self.draft())
         self.assertTrue(result.success)
         self.assertEqual("thread-1", result.external_post_id)
         self.assertEqual("", result.external_url)
         self.assertEqual("The requested resource does not exist", result.raw_response["thread_fetch_error"])
+
+    def test_image_publish_waits_for_container_processing(self):
+        posts = [self.response({"id": "container-1"}), self.response({"id": "thread-1"})]
+        gets = [
+            self.response({"status": "IN_PROGRESS"}),
+            self.response({"status": "FINISHED"}),
+            self.response({"id": "thread-1", "permalink": "https://www.threads.net/@chloe/post/thread-1"}),
+        ]
+        with patch("frikshun_creator.publishers.threads.requests.post", side_effect=posts) as post, \
+            patch("frikshun_creator.publishers.threads.requests.get", side_effect=gets), \
+            patch("frikshun_creator.publishers.threads.time.sleep") as sleep:
+            result = ThreadsAdapter(access_token="threads-token", dry_run=False).publish(self.draft())
+
+        self.assertTrue(result.success)
+        self.assertEqual("FINISHED", result.raw_response["status"]["status"])
+        self.assertEqual(2, post.call_count)
+        sleep.assert_called_once_with(2)
+
+    def test_api_error_includes_user_detail_and_codes(self):
+        response = self.response(
+            {
+                "error": {
+                    "message": "Unknown error",
+                    "error_user_msg": "The image could not be downloaded.",
+                    "error_data": {"details": "Refresh the media URL and try again."},
+                    "code": 10,
+                    "error_subcode": 2207002,
+                }
+            },
+            ok=False,
+            reason="Bad Request",
+        )
+        with self.assertRaisesRegex(ValueError, "image could not be downloaded.*code 10.*subcode 2207002"):
+            ThreadsAdapter(access_token="threads-token", dry_run=False).response_payload(response)
 
     def test_fetch_post_metrics_maps_insights(self):
         publication = SimpleNamespace(external_post_id="thread-1", external_url="https://threads.test/original")

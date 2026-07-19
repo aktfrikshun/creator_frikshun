@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -68,6 +68,120 @@ class PlatformAccount(Base):
     profile_url: Mapped[str] = mapped_column(String(500), default="")
     oauth_status: Mapped[str] = mapped_column(String(80), default="manual")
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    external_account_id: Mapped[Optional[str]] = mapped_column(String(240), nullable=True)
+    display_name: Mapped[Optional[str]] = mapped_column(String(240), nullable=True)
+    analytics_status: Mapped[Optional[str]] = mapped_column(String(80), default="not_connected")
+    publishing_mode: Mapped[Optional[str]] = mapped_column(String(80), default="manual")
+    capabilities: Mapped[Optional[dict]] = mapped_column(JSON, default=dict)
+    account_metadata: Mapped[Optional[dict]] = mapped_column(JSON, default=dict)
+    last_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    remote_content: Mapped[List["RemoteContent"]] = relationship(
+        back_populates="platform_account", cascade="all, delete-orphan"
+    )
+    metric_snapshots: Mapped[List["AccountMetricSnapshot"]] = relationship(
+        back_populates="platform_account", cascade="all, delete-orphan"
+    )
+    sync_runs: Mapped[List["AnalyticsSyncRun"]] = relationship(
+        back_populates="platform_account", cascade="all, delete-orphan"
+    )
+
+
+class RemoteContent(Base):
+    __tablename__ = "creator_remote_content"
+    __table_args__ = (
+        UniqueConstraint("platform_account_id", "external_content_id", name="uq_remote_content"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    platform_account_id: Mapped[int] = mapped_column(
+        ForeignKey("creator_platform_accounts.id"), nullable=False
+    )
+    post_publication_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("creator_post_publications.id"), nullable=True, unique=True
+    )
+    external_content_id: Mapped[str] = mapped_column(String(240), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(80), default="post")
+    title: Mapped[str] = mapped_column(String(500), default="")
+    body: Mapped[str] = mapped_column(Text, default="")
+    permalink: Mapped[str] = mapped_column(String(1000), default="")
+    thumbnail_url: Mapped[str] = mapped_column(String(1000), default="")
+    status: Mapped[str] = mapped_column(String(80), default="available")
+    published_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    discovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    content_metadata: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    platform_account: Mapped[PlatformAccount] = relationship(back_populates="remote_content")
+    post_publication: Mapped[Optional["PostPublication"]] = relationship()
+    metric_snapshots: Mapped[List["ContentMetricSnapshot"]] = relationship(
+        back_populates="remote_content", cascade="all, delete-orphan"
+    )
+
+
+class AccountMetricSnapshot(Base):
+    __tablename__ = "creator_account_metric_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    platform_account_id: Mapped[int] = mapped_column(
+        ForeignKey("creator_platform_accounts.id"), nullable=False
+    )
+    followers: Mapped[int] = mapped_column(Integer, default=0)
+    following: Mapped[int] = mapped_column(Integer, default=0)
+    content_count: Mapped[int] = mapped_column(Integer, default=0)
+    views: Mapped[int] = mapped_column(Integer, default=0)
+    reach: Mapped[int] = mapped_column(Integer, default=0)
+    engagements: Mapped[int] = mapped_column(Integer, default=0)
+    profile_views: Mapped[int] = mapped_column(Integer, default=0)
+    metrics: Mapped[dict] = mapped_column(JSON, default=dict)
+    period_start: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    period_end: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    platform_account: Mapped[PlatformAccount] = relationship(back_populates="metric_snapshots")
+
+
+class ContentMetricSnapshot(Base):
+    __tablename__ = "creator_content_metric_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    remote_content_id: Mapped[int] = mapped_column(
+        ForeignKey("creator_remote_content.id"), nullable=False
+    )
+    views: Mapped[int] = mapped_column(Integer, default=0)
+    reach: Mapped[int] = mapped_column(Integer, default=0)
+    likes: Mapped[int] = mapped_column(Integer, default=0)
+    comments: Mapped[int] = mapped_column(Integer, default=0)
+    shares: Mapped[int] = mapped_column(Integer, default=0)
+    saves: Mapped[int] = mapped_column(Integer, default=0)
+    clicks: Mapped[int] = mapped_column(Integer, default=0)
+    watch_time_seconds: Mapped[int] = mapped_column(Integer, default=0)
+    average_view_duration_seconds: Mapped[int] = mapped_column(Integer, default=0)
+    metrics: Mapped[dict] = mapped_column(JSON, default=dict)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    remote_content: Mapped[RemoteContent] = relationship(back_populates="metric_snapshots")
+
+
+class AnalyticsSyncRun(Base):
+    __tablename__ = "creator_analytics_sync_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    platform_account_id: Mapped[int] = mapped_column(
+        ForeignKey("creator_platform_accounts.id"), nullable=False
+    )
+    sync_type: Mapped[str] = mapped_column(String(80), default="daily")
+    status: Mapped[str] = mapped_column(String(80), default="running")
+    discovered_count: Mapped[int] = mapped_column(Integer, default=0)
+    updated_count: Mapped[int] = mapped_column(Integer, default=0)
+    error_count: Mapped[int] = mapped_column(Integer, default=0)
+    cursor: Mapped[str] = mapped_column(Text, default="")
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    details: Mapped[dict] = mapped_column(JSON, default=dict)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    platform_account: Mapped[PlatformAccount] = relationship(back_populates="sync_runs")
 
 
 class PostDraft(Base):
@@ -135,6 +249,21 @@ class PostMetricSnapshot(Base):
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     post_publication: Mapped[PostPublication] = relationship(back_populates="metric_snapshots")
+
+
+class MetricsPollRun(Base):
+    __tablename__ = "creator_metrics_poll_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source: Mapped[str] = mapped_column(String(80), default="scheduler")
+    status: Mapped[str] = mapped_column(String(80), default="running")
+    scanned: Mapped[int] = mapped_column(Integer, default=0)
+    snapshots_created: Mapped[int] = mapped_column(Integer, default=0)
+    interactions_created: Mapped[int] = mapped_column(Integer, default=0)
+    errors_count: Mapped[int] = mapped_column(Integer, default=0)
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class PostInteraction(Base):

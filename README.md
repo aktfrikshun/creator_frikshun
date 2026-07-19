@@ -281,7 +281,7 @@ Or from the command line:
 flask --app app poll-post-metrics
 ```
 
-The metrics layer is platform-neutral and currently includes Facebook, Instagram, Threads, and X adapters, plus FanVue. Each poll stores a new snapshot in `creator_post_metric_snapshots` and imports supported comments into `creator_post_interactions` with `reply_status=pending_review`.
+The installed launchd job runs this poll once daily (and once when loaded). The metrics layer is platform-neutral and currently includes Facebook, Instagram, Threads, and X adapters, plus FanVue. Account and content analytics are coalesced into one snapshot per UTC day, while supported comments are imported into `creator_post_interactions` with `reply_status=pending_review`.
 
 ## X Publishing Setup
 

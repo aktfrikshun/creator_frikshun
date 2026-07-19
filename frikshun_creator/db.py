@@ -64,6 +64,15 @@ def ensure_runtime_columns():
     draft_columns = {
         "archived": "BOOLEAN",
     }
+    platform_account_columns = {
+        "external_account_id": "VARCHAR(240)",
+        "display_name": "VARCHAR(240)",
+        "analytics_status": "VARCHAR(80)",
+        "publishing_mode": "VARCHAR(80)",
+        "capabilities": "JSON",
+        "account_metadata": "JSON",
+        "last_synced_at": "TIMESTAMP",
+    }
 
     with engine.begin() as connection:
         for name, column_type in artifact_columns.items():
@@ -88,6 +97,18 @@ def ensure_runtime_columns():
                 if name not in draft_existing:
                     connection.execute(
                         text(f"ALTER TABLE creator_post_drafts ADD COLUMN {name} {column_type}")
+                    )
+
+        if inspector.has_table("creator_platform_accounts"):
+            account_existing = {
+                column["name"] for column in inspector.get_columns("creator_platform_accounts")
+            }
+            for name, column_type in platform_account_columns.items():
+                if name not in account_existing:
+                    connection.execute(
+                        text(
+                            f"ALTER TABLE creator_platform_accounts ADD COLUMN {name} {column_type}"
+                        )
                     )
 
 

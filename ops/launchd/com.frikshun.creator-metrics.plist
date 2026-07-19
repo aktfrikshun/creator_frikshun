@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.frikshun.creator-metrics</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/allentaylor/src/creator_frikshun/.venv/bin/flask</string>
+    <string>--app</string>
+    <string>app</string>
+    <string>poll-post-metrics</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/allentaylor/src/creator_frikshun</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>86400</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/Users/allentaylor/Library/Logs/FrikShun/metrics.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/allentaylor/Library/Logs/FrikShun/metrics-error.log</string>
+</dict>
+</plist>

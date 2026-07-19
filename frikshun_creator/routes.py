@@ -12,20 +12,37 @@ from werkzeug.utils import secure_filename
 from sqlalchemy import String, cast, or_
 
 from .db import get_session
-from .models import Artifact, CanonEntry, PlatformAccount, PostDraft, PostInteraction, PostPublication
+from .models import (
+    ContentMetricSnapshot,
+    Artifact,
+    CanonEntry,
+    MetricsPollRun,
+    PlatformAccount,
+    PostDraft,
+    PostInteraction,
+    PostMetricSnapshot,
+    PostPublication,
+    RemoteContent,
+)
 from .publishers import FacebookAdapter, InstagramAdapter, ThreadsAdapter, XAdapter, FanvueAdapter
 from .services.canon_importer import CanonImporter
+from .services.analytics_accounts import synchronize_account_registry
+from .services.account_analytics_runner import AccountAnalyticsRunner
 from .services.draft_generator import ArtifactDraftGenerator, PLATFORMS
 from .services.generation_context import load_generation_context
+from .services.google_oauth import GoogleOAuth
 from .services.fanvue_oauth import FanvueOAuth
 from .services.media_analyzer import MediaAnalyzer
 from .services.metadata_generator import ArtifactMetadataGenerator
 from .services.post_metrics import PostMetricsPoller, latest_snapshot_by_publication
 from .services.post_preview import apply_review_form, platform_summary
 from .services.sample_artifact_importer import SampleArtifactImporter
+from .services.s3_media_storage import S3MediaStorage
 from .services.social_post_importer import SocialPostImporter
 from .services.text import split_tags
 from .services.threads_oauth import ThreadsOAuth
+from .services.tiktok_oauth import TikTokOAuth
+from .services.youtube_oauth import YouTubeOAuth
 from .services.uploads import archive_media_filename, next_fragment_code, save_artifact_file
 
 bp = Blueprint("creator", __name__)
@@ -38,6 +55,118 @@ DAILY_POST_FAMILIES = {
     "travel": ("Travel", "travel", "Field Note"),
     "craft": ("Creator craft", "craft", "Creator Note"),
 }
+
+PUBLIC_ENDPOINTS = {
+    "creator.terms",
+    "creator.privacy",
+    "creator.acceptable_use",
+    "creator.google_login",
+    "creator.google_callback",
+    "creator.google_logout",
+    "creator.youtube_oauth_callback",
+    "creator.tiktok_oauth_callback",
+    "creator.fanvue_oauth_callback",
+    "creator.threads_oauth_callback",
+}
+
+
+def google_oauth():
+    return GoogleOAuth(
+        client_id=current_app.config.get("GOOGLE_OAUTH_CLIENT_ID"),
+        client_secret=current_app.config.get("GOOGLE_OAUTH_CLIENT_SECRET"),
+        redirect_uri=current_app.config.get("GOOGLE_OAUTH_REDIRECT_URI"),
+    )
+
+
+def allowed_google_emails():
+    return {
+        email.strip().lower()
+        for email in current_app.config.get("GOOGLE_ALLOWED_EMAILS", "").split(",")
+        if email.strip()
+    }
+
+
+def safe_next_url(value):
+    value = (value or "/").strip()
+    if not value.startswith("/") or value.startswith("//"):
+        return "/"
+    return value
+
+
+@bp.before_request
+def require_creator_login():
+    if not current_app.config.get("CREATOR_AUTH_REQUIRED"):
+        return None
+    if request.endpoint in PUBLIC_ENDPOINTS:
+        return None
+    user = flask_session.get("creator_user") or {}
+    if user.get("email", "").lower() in allowed_google_emails():
+        return None
+    destination = request.full_path.rstrip("?") if request.method == "GET" else "/"
+    return redirect(url_for("creator.google_login", next=destination), code=303)
+
+
+@bp.get("/auth/google/login")
+def google_login():
+    destination = safe_next_url(request.args.get("next"))
+    try:
+        authorization_url, state = google_oauth().begin()
+    except ValueError as error:
+        return render_template("auth_unavailable.html", error=str(error)), 503
+    flask_session["google_oauth_state"] = state
+    flask_session["google_oauth_next"] = destination
+    return redirect(authorization_url)
+
+
+@bp.get("/auth/google/callback")
+def google_callback():
+    if request.args.get("error"):
+        return render_template("auth_unavailable.html", error="Google authorization was cancelled or denied."), 403
+    state = request.args.get("state", "")
+    expected_state = flask_session.pop("google_oauth_state", "")
+    if not state or not secrets_compare(state, expected_state):
+        return render_template("auth_unavailable.html", error="Google authorization returned an invalid state."), 400
+    code = request.args.get("code", "")
+    if not code:
+        return render_template("auth_unavailable.html", error="Google authorization did not return a code."), 400
+    try:
+        user = google_oauth().exchange(code)
+    except (requests.RequestException, ValueError) as error:
+        current_app.logger.error("Google OAuth failed: %s", error)
+        return render_template("auth_unavailable.html", error="Google sign-in could not be completed."), 400
+    email = user["email"].lower()
+    if email not in allowed_google_emails():
+        flask_session.clear()
+        return render_template("auth_unavailable.html", error=f"{email} is not authorized for Creator OS."), 403
+    destination = safe_next_url(flask_session.pop("google_oauth_next", "/"))
+    flask_session["creator_user"] = {
+        "email": email,
+        "name": user.get("name") or email,
+        "picture": user.get("picture") or "",
+    }
+    flask_session.permanent = True
+    return redirect(destination)
+
+
+@bp.get("/auth/logout")
+def google_logout():
+    flask_session.clear()
+    return redirect(url_for("creator.google_login"))
+
+
+@bp.get("/terms")
+def terms():
+    return render_template("legal/terms.html")
+
+
+@bp.get("/privacy")
+def privacy():
+    return render_template("legal/privacy.html")
+
+
+@bp.get("/acceptable-use")
+def acceptable_use():
+    return render_template("legal/acceptable_use.html")
 
 
 def daily_post_family(artifact):
@@ -76,6 +205,95 @@ def threads_oauth():
         auth_url=current_app.config.get("THREADS_AUTH_URL"),
         api_base_url=current_app.config.get("THREADS_API_BASE_URL"),
     )
+
+
+def tiktok_oauth():
+    return TikTokOAuth(
+        client_key=current_app.config.get("TIKTOK_CLIENT_KEY"),
+        client_secret=current_app.config.get("TIKTOK_CLIENT_SECRET"),
+        redirect_uri=current_app.config.get("TIKTOK_REDIRECT_URI"),
+        token_path=current_app.config.get("TIKTOK_TOKEN_PATH"),
+    )
+
+
+def youtube_oauth():
+    return YouTubeOAuth(
+        client_id=current_app.config.get("YOUTUBE_CLIENT_ID"),
+        client_secret=current_app.config.get("YOUTUBE_CLIENT_SECRET"),
+        redirect_uri=current_app.config.get("YOUTUBE_REDIRECT_URI"),
+        token_path=current_app.config.get("YOUTUBE_TOKEN_PATH"),
+    )
+
+
+@bp.get("/oauth/youtube/start")
+def youtube_oauth_start():
+    try:
+        authorization_url, state = youtube_oauth().begin()
+    except ValueError as error:
+        return str(error), 503
+    flask_session["youtube_oauth_state"] = state
+    return redirect(authorization_url)
+
+
+@bp.get("/oauth/youtube/callback")
+def youtube_oauth_callback():
+    if request.args.get("error"):
+        return f"YouTube authorization failed: {request.args.get('error_description') or request.args['error']}", 400
+    state = request.args.get("state", "")
+    expected_state = flask_session.pop("youtube_oauth_state", "")
+    if not state or not secrets_compare(state, expected_state):
+        return "YouTube authorization failed: invalid OAuth state.", 400
+    code = request.args.get("code", "")
+    if not code:
+        return "YouTube authorization failed: missing authorization code.", 400
+    try:
+        youtube_oauth().exchange(code)
+    except (requests.RequestException, ValueError) as error:
+        return f"YouTube token exchange failed: {error}", 400
+    session = get_session()
+    account = session.query(PlatformAccount).filter_by(platform="youtube").one_or_none()
+    if account:
+        account.oauth_status = "connected"
+        account.analytics_status = "connected"
+        session.commit()
+    return "YouTube authorization succeeded. Channel analytics are connected; you may close this tab."
+
+
+@bp.get("/oauth/tiktok/start")
+def tiktok_oauth_start():
+    try:
+        authorization_url, state = tiktok_oauth().begin()
+    except ValueError as error:
+        return str(error), 503
+    flask_session["tiktok_oauth_state"] = state
+    return redirect(authorization_url)
+
+
+@bp.get("/oauth/tiktok/callback")
+def tiktok_oauth_callback():
+    if request.args.get("error"):
+        return f"TikTok authorization failed: {request.args.get('error_description') or request.args['error']}", 400
+    state = request.args.get("state", "")
+    expected_state = flask_session.pop("tiktok_oauth_state", "")
+    if not state or not secrets_compare(state, expected_state):
+        return "TikTok authorization failed: invalid OAuth state.", 400
+    code = request.args.get("code", "")
+    if not code:
+        return "TikTok authorization failed: missing authorization code.", 400
+    try:
+        saved = tiktok_oauth().exchange(code)
+    except (requests.RequestException, ValueError) as error:
+        current_app.logger.error("TikTok token exchange failed: %s", error)
+        return f"TikTok token exchange failed: {error}", 400
+    session = get_session()
+    account = session.query(PlatformAccount).filter_by(platform="tiktok").one_or_none()
+    if account:
+        account.external_account_id = saved.get("open_id")
+        account.oauth_status = "connected"
+        account.analytics_status = "connected"
+        account.account_metadata = {"scope": saved.get("scope", "")}
+        session.commit()
+    return "TikTok authorization succeeded. Analytics access is connected; you may close this tab."
 
 
 @bp.get("/oauth/fanvue/start")
@@ -168,6 +386,45 @@ def instagram_adapter():
     )
 
 
+def refresh_meta_media_url(draft):
+    """Refresh expiring S3 media URLs before a saved draft is retried."""
+    artifact = draft.artifact
+    metadata = dict((artifact.generated_metadata or {}) or {})
+    object_key = str(metadata.get("s3_object_key") or "").strip()
+    media_path = Path(str(artifact.media_path or "")).expanduser()
+    content_type = str(artifact.media_content_type or "").lower()
+    existing_url = str(metadata.get("public_media_url") or "").strip()
+
+    if not object_key and not media_path.is_file():
+        return existing_url
+
+    storage = S3MediaStorage(
+        bucket=current_app.config.get("S3_MEDIA_BUCKET"),
+        region=current_app.config.get("S3_MEDIA_REGION"),
+        prefix=current_app.config.get("S3_MEDIA_PREFIX"),
+        presign_seconds=current_app.config.get("S3_PRESIGN_SECONDS"),
+    )
+    if object_key:
+        refreshed_url = storage.refresh_signed_url(object_key)
+    elif content_type.startswith("image/"):
+        stored = storage.store_instagram_image(
+            media_path,
+            artifact.title,
+            local_day=(artifact.created_at or datetime.now(timezone.utc)).date(),
+            output_dir=current_app.config.get("UPLOAD_FOLDER"),
+        )
+        object_key = stored.object_key
+        refreshed_url = stored.signed_url
+        metadata["s3_bucket"] = current_app.config.get("S3_MEDIA_BUCKET")
+        metadata["s3_object_key"] = object_key
+    else:
+        return existing_url
+
+    metadata["public_media_url"] = refreshed_url
+    artifact.generated_metadata = metadata
+    return refreshed_url
+
+
 def x_adapter():
     return XAdapter(
         consumer_key=current_app.config.get("X_CONSUMER_KEY"),
@@ -194,7 +451,7 @@ def threads_adapter():
 @bp.get("/")
 def index():
     session = get_session()
-    ensure_platform_accounts(session)
+    analytics_accounts = ensure_platform_accounts(session)
     search = request.args.get("q", "").strip()
     family = request.args.get("family", "").strip().lower()
     platform = request.args.get("platform", "").strip().lower()
@@ -259,7 +516,11 @@ def index():
         selected_status=status,
         platforms=PLATFORMS,
         canon_count=canon_count,
+        analytics_accounts=analytics_accounts,
         publishing_status={
+            "facebook": "dry run" if current_app.config.get("FACEBOOK_DRY_RUN") else "live",
+            "instagram": "dry run" if current_app.config.get("INSTAGRAM_DRY_RUN") else "live",
+            "threads": "dry run" if current_app.config.get("THREADS_DRY_RUN") else "live",
             "x": (
                 "dry run"
                 if x_publisher.dry_run
@@ -335,7 +596,74 @@ def publish_daily_fragment(artifact_id):
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
-    flash("Publishing to X and FanVue has started. Existing successful publications will be skipped.", "success")
+    flash(
+        "Publishing to all connected platforms has started. Existing successful publications will be skipped.",
+        "success",
+    )
+    return redirect(url_for("creator.index"))
+
+
+@bp.post("/drafts/<int:draft_id>/publish-from-library")
+def publish_draft_from_library(draft_id):
+    session = get_session()
+    draft = session.get(PostDraft, draft_id)
+    if draft is None or draft.archived:
+        abort(404)
+    if draft.status not in {"approved", "failed"}:
+        flash(f"{draft.platform.title()} is not waiting to be published.", "error")
+        return redirect(url_for("creator.index"))
+
+    already_published = any(
+        publication.status == "published" and publication.external_post_id
+        for publication in draft.publications
+    )
+    if already_published:
+        draft.status = "published"
+        session.commit()
+        flash(f"{draft.platform.title()} was already published; no duplicate was created.", "success")
+        return redirect(url_for("creator.index"))
+
+    adapters = {
+        "facebook": facebook_adapter,
+        "instagram": instagram_adapter,
+        "threads": threads_adapter,
+        "x": x_adapter,
+        "fanvue": fanvue_adapter,
+    }
+    adapter_factory = adapters.get(draft.platform)
+    if adapter_factory is None:
+        flash(f"Automatic publishing is not configured for {draft.platform.title()}.", "error")
+        return redirect(url_for("creator.index"))
+
+    if draft.platform in {"instagram", "threads"}:
+        try:
+            refresh_meta_media_url(draft)
+        except (OSError, ValueError) as error:
+            flash(f"{draft.platform.title()} media refresh failed: {error}", "error")
+            return redirect(url_for("creator.index"))
+
+    draft.updated_at = datetime.now(timezone.utc)
+    result = adapter_factory().publish(draft)
+    draft.status = result.status
+    if result.success:
+        draft.approved_at = datetime.now(timezone.utc)
+    session.add(
+        PostPublication(
+            post_draft_id=draft.id,
+            platform=draft.platform,
+            status=result.status,
+            external_post_id=result.external_post_id,
+            external_url=result.external_url,
+            error_message=result.error_message,
+            raw_response=result.raw_response,
+        )
+    )
+    session.commit()
+    label = "FanVue" if draft.platform == "fanvue" else draft.platform.title()
+    flash(
+        f"{label} {result.status}." if result.success else (result.error_message or f"{label} publish failed."),
+        "success" if result.success else "error",
+    )
     return redirect(url_for("creator.index"))
 
 
@@ -533,24 +861,211 @@ def review_draft(draft_id):
 @bp.get("/metrics")
 def metrics_dashboard():
     session = get_session()
+    latest_poll = session.query(MetricsPollRun).order_by(MetricsPollRun.started_at.desc()).first()
     publications = (
         session.query(PostPublication)
-        .filter(PostPublication.status == "published")
+        .filter(PostPublication.status.in_(("published", "not_found")))
         .order_by(PostPublication.created_at.desc())
-        .limit(50)
+        .limit(500)
         .all()
     )
     interactions = (
         session.query(PostInteraction)
         .order_by(PostInteraction.fetched_at.desc())
-        .limit(50)
+        .limit(500)
         .all()
     )
+    latest_snapshots = latest_snapshot_by_publication(publications)
+    publication_rows = []
+    for publication in publications:
+        snapshot = latest_snapshots.get(publication.id)
+        publication_rows.append(
+            {
+                "id": publication.id,
+                "source": "publication",
+                "title": publication.post_draft.artifact.title,
+                "platform": publication.platform,
+                "status": publication.status,
+                "externalId": publication.external_post_id,
+                "externalUrl": publication.external_url,
+                "views": snapshot.views if snapshot else 0,
+                "reach": snapshot.reach if snapshot else 0,
+                "likes": snapshot.likes if snapshot else 0,
+                "comments": snapshot.comments if snapshot else 0,
+                "shares": snapshot.shares if snapshot else 0,
+                "saves": snapshot.saves if snapshot else 0,
+                "clicks": snapshot.clicks if snapshot else 0,
+                "publishedAt": publication.created_at.isoformat(),
+                "fetchedAt": snapshot.fetched_at.isoformat() if snapshot else "",
+            }
+        )
+    remote_content = (
+        session.query(RemoteContent)
+        .order_by(RemoteContent.published_at.desc())
+        .limit(1000)
+        .all()
+    )
+    for content in remote_content:
+        if content.post_publication_id:
+            continue
+        snapshot = (
+            session.query(ContentMetricSnapshot)
+            .filter(ContentMetricSnapshot.remote_content_id == content.id)
+            .order_by(ContentMetricSnapshot.fetched_at.desc())
+            .first()
+        )
+        publication_rows.append(
+            {
+                "id": f"remote-{content.id}",
+                "source": "account",
+                "title": content.title or content.body or f"{content.platform_account.platform.title()} post",
+                "platform": content.platform_account.platform,
+                "status": "published" if content.status == "available" else content.status,
+                "externalId": content.external_content_id,
+                "externalUrl": content.permalink,
+                "views": snapshot.views if snapshot else 0,
+                "reach": snapshot.reach if snapshot else 0,
+                "likes": snapshot.likes if snapshot else 0,
+                "comments": snapshot.comments if snapshot else 0,
+                "shares": snapshot.shares if snapshot else 0,
+                "saves": snapshot.saves if snapshot else 0,
+                "clicks": snapshot.clicks if snapshot else 0,
+                "publishedAt": content.published_at.isoformat() if content.published_at else "",
+                "fetchedAt": snapshot.fetched_at.isoformat() if snapshot else "",
+            }
+        )
+    interaction_rows = [
+        {
+            "id": interaction.id,
+            "platform": interaction.platform,
+            "type": interaction.interaction_type,
+            "author": interaction.author_name or "Unknown",
+            "body": interaction.body,
+            "replyStatus": interaction.reply_status,
+            "receivedAt": interaction.received_at.isoformat() if interaction.received_at else "",
+            "fetchedAt": interaction.fetched_at.isoformat(),
+            "externalId": interaction.external_id,
+            "postTitle": (
+                interaction.post_publication.post_draft.artifact.title
+                if interaction.post_publication
+                else ""
+            ),
+        }
+        for interaction in interactions
+    ]
+    active_rows = [row for row in publication_rows if row["status"] == "published"]
+    active_publication_ids = {
+        row["id"] for row in active_rows if row.get("source") == "publication"
+    }
+    snapshot_history = (
+        session.query(PostMetricSnapshot)
+        .filter(PostMetricSnapshot.post_publication_id.in_(active_publication_ids))
+        .order_by(PostMetricSnapshot.fetched_at.asc())
+        .all()
+        if active_publication_ids
+        else []
+    )
+    history_by_row = {}
+    for snapshot in snapshot_history:
+        history_by_row.setdefault(snapshot.post_publication_id, []).append(snapshot)
+    remote_ids = [content.id for content in remote_content if not content.post_publication_id]
+    content_snapshot_history = (
+        session.query(ContentMetricSnapshot)
+        .filter(ContentMetricSnapshot.remote_content_id.in_(remote_ids))
+        .order_by(ContentMetricSnapshot.fetched_at.asc())
+        .all()
+        if remote_ids
+        else []
+    )
+    for snapshot in content_snapshot_history:
+        history_by_row.setdefault(f"remote-{snapshot.remote_content_id}", []).append(snapshot)
+    platform_names = sorted({row["platform"] for row in active_rows})
+    platform_summaries = []
+    for platform in platform_names:
+        rows = [row for row in active_rows if row["platform"] == platform]
+        engagement = sum(
+            row["likes"] + row["comments"] + row["shares"] + row["saves"]
+            for row in rows
+        )
+        previous_engagement = 0
+        has_previous_snapshot = False
+        for row in rows:
+            history = history_by_row.get(row["id"], [])
+            previous = history[-2] if len(history) > 1 else None
+            if previous:
+                has_previous_snapshot = True
+                previous_engagement += (
+                    previous.likes + previous.comments + previous.shares + previous.saves
+                )
+        platform_summaries.append(
+            {
+                "platform": platform,
+                "posts": len(rows),
+                "engagement": engagement,
+                "growth": engagement - previous_engagement if has_previous_snapshot else 0,
+                "reach": sum(row["reach"] for row in rows),
+                "views": sum(row["views"] for row in rows),
+                "comments": sum(row["comments"] for row in rows),
+                "engagementRate": round(
+                    engagement / max(sum(row["reach"] for row in rows), 1) * 100, 2
+                ),
+            }
+        )
+    platform_summaries.sort(key=lambda row: row["engagement"], reverse=True)
+
+    daily_latest = {}
+    for row in active_rows:
+        for snapshot in history_by_row.get(row["id"], []):
+            key = (
+                snapshot.fetched_at.date().isoformat(),
+                row["platform"],
+                row["id"],
+            )
+            daily_latest[key] = snapshot
+    trend_totals = {}
+    for (day, platform, _publication_id), snapshot in daily_latest.items():
+        trend_totals.setdefault((day, platform), 0)
+        trend_totals[(day, platform)] += (
+            snapshot.likes + snapshot.comments + snapshot.shares + snapshot.saves
+        )
+    trend_dates = sorted({day for day, _platform in trend_totals})[-30:]
+    platform_trends = [
+        {
+            "platform": platform,
+            "points": [
+                {"date": day, "engagement": trend_totals.get((day, platform), 0)}
+                for day in trend_dates
+            ],
+        }
+        for platform in platform_names
+    ]
+    summary = {
+        "activePosts": len(active_rows),
+        "views": sum(row["views"] for row in active_rows),
+        "reach": sum(row["reach"] for row in active_rows),
+        "engagements": sum(
+            row["likes"] + row["comments"] + row["shares"] + row["saves"]
+            for row in active_rows
+        ),
+        "pendingInteractions": sum(
+            row["replyStatus"] == "pending_review" for row in interaction_rows
+        ),
+        "lastFetched": max(
+            (row["fetchedAt"] for row in publication_rows if row["fetchedAt"]),
+            default="",
+        ),
+    }
     return render_template(
         "metrics.html",
         publications=publications,
-        latest_snapshots=latest_snapshot_by_publication(publications),
+        latest_snapshots=latest_snapshots,
         interactions=interactions,
+        publication_rows=publication_rows,
+        interaction_rows=interaction_rows,
+        platform_summaries=platform_summaries,
+        platform_trends=platform_trends,
+        summary=summary,
+        latest_poll=latest_poll,
     )
 
 
@@ -566,15 +1081,29 @@ def poll_metrics():
             "x": x_adapter(),
             "fanvue": fanvue_adapter(),
         },
-    ).run()
+    ).run(source="manual")
+    account_result = AccountAnalyticsRunner(session, current_app.config).run()
     message = (
         f"Metrics poll complete: {result.snapshots_created} snapshots, "
         f"{result.interactions_created} new interactions, "
         f"{result.interactions_updated} updated interactions, "
+        f"{result.marked_unpublished} missing posts returned to approved, "
         f"{result.skipped} skipped."
     )
-    flash(message, "success" if not result.errors else "error")
-    for error in result.errors[:3]:
+    if account_result.platform_results:
+        account_snapshots = sum(
+            item.account_snapshots for item in account_result.platform_results.values()
+        )
+        content_snapshots = sum(
+            item.content_snapshots for item in account_result.platform_results.values()
+        )
+        message += (
+            f" Account-wide sync: {account_snapshots} account snapshots and "
+            f"{content_snapshots} content snapshots."
+        )
+    all_errors = [*result.errors, *account_result.errors]
+    flash(message, "success" if not all_errors else "error")
+    for error in all_errors[:3]:
         flash(error, "error")
     return redirect(url_for("creator.metrics_dashboard"))
 
@@ -664,6 +1193,11 @@ def publish_instagram(draft_id):
 
     apply_review_form(draft, request.form)
     draft.updated_at = datetime.now(timezone.utc)
+    try:
+        refresh_meta_media_url(draft)
+    except (OSError, ValueError) as error:
+        flash(f"Instagram media refresh failed: {error}", "error")
+        return redirect(url_for("creator.review_draft", draft_id=draft.id))
     result = instagram_adapter().publish(draft)
     draft.status = result.status
     if result.success:
@@ -718,6 +1252,11 @@ def publish_threads(draft_id):
         return redirect(url_for("creator.index"))
     apply_review_form(draft, request.form)
     draft.updated_at = datetime.now(timezone.utc)
+    try:
+        refresh_meta_media_url(draft)
+    except (OSError, ValueError) as error:
+        flash(f"Threads media refresh failed: {error}", "error")
+        return redirect(url_for("creator.review_draft", draft_id=draft.id))
     result = threads_adapter().publish(draft)
     draft.status = result.status
     if result.success:
@@ -757,11 +1296,4 @@ def publish_fanvue(draft_id):
 
 
 def ensure_platform_accounts(session):
-    existing = {
-        row.platform
-        for row in session.query(PlatformAccount.platform).filter(PlatformAccount.active.is_(True)).all()
-    }
-    for platform in PLATFORMS:
-        if platform not in existing:
-            session.add(PlatformAccount(platform=platform, oauth_status="manual", active=True))
-    session.commit()
+    return synchronize_account_registry(session, current_app.config)

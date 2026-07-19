@@ -32,6 +32,52 @@ class RoutesTest(unittest.TestCase):
     def tearDown(self):
         self.uploads.cleanup()
 
+    def test_legal_pages_are_public_and_cross_linked(self):
+        expectations = {
+            "/terms": b"Terms of Service",
+            "/privacy": b"Privacy Policy",
+            "/acceptable-use": b"Acceptable Use Policy",
+        }
+
+        for path, heading in expectations.items():
+            response = self.client.get(path)
+            self.assertEqual(200, response.status_code)
+            self.assertIn(heading, response.data)
+            self.assertIn(b'href="/terms"', response.data)
+            self.assertIn(b'href="/privacy"', response.data)
+            self.assertIn(b'href="/acceptable-use"', response.data)
+
+    def test_google_auth_protects_creator_and_metrics_but_not_legal_pages(self):
+        self.app.config.update(
+            CREATOR_AUTH_REQUIRED=True,
+            GOOGLE_ALLOWED_EMAILS="aktfrikshun@gmail.com",
+        )
+
+        for path in ("/", "/metrics"):
+            response = self.client.get(path)
+            self.assertEqual(303, response.status_code)
+            self.assertIn("/auth/google/login", response.headers["Location"])
+
+        for path in ("/terms", "/privacy", "/acceptable-use"):
+            self.assertEqual(200, self.client.get(path).status_code)
+
+        response = self.client.post("/metrics/poll")
+        self.assertEqual(303, response.status_code)
+        self.assertIn("/auth/google/login", response.headers["Location"])
+
+    def test_google_auth_allows_allowlisted_session(self):
+        self.app.config.update(
+            CREATOR_AUTH_REQUIRED=True,
+            GOOGLE_ALLOWED_EMAILS="aktfrikshun@gmail.com",
+        )
+        with self.client.session_transaction() as session:
+            session["creator_user"] = {"email": "aktfrikshun@gmail.com", "name": "Allen"}
+
+        self.assertEqual(200, self.client.get("/").status_code)
+        metrics = self.client.get("/metrics")
+        self.assertEqual(200, metrics.status_code)
+        self.assertIn(b"Sign out Allen", metrics.data)
+
     def test_daily_fragment_manual_posting_kit_downloads_images_and_platform_captions(self):
         public_path = Path(self.uploads.name) / "public.png"
         fanvue_path = Path(self.uploads.name) / "fanvue.png"
@@ -263,6 +309,47 @@ class RoutesTest(unittest.TestCase):
         with self.app.app_context():
             publication = get_session().query(PostPublication).filter_by(platform="threads").one()
             self.assertTrue(publication.external_post_id.startswith("dry-run-threads-"))
+
+    def test_threads_retry_refreshes_saved_s3_media_url(self):
+        with self.app.app_context():
+            session = get_session()
+            artifact = Artifact(
+                title="Older Threads Signal",
+                media_path="/missing/older-signal.jpg",
+                media_content_type="image/jpeg",
+                generated_metadata={
+                    "public_media_url": "https://expired.example.test/older-signal.jpg",
+                    "s3_object_key": "social/older-signal.jpg",
+                },
+            )
+            session.add(artifact)
+            session.flush()
+            draft = PostDraft(
+                artifact_id=artifact.id,
+                platform="threads",
+                caption="An older signal returns. Which version still speaks?",
+                hashtags=["ChloKat"],
+            )
+            session.add(draft)
+            session.commit()
+            draft_id = draft.id
+
+        with patch("frikshun_creator.routes.S3MediaStorage.refresh_signed_url", return_value="https://fresh.example.test/older-signal.jpg") as refresh:
+            response = self.client.post(
+                f"/drafts/{draft_id}/publish/threads",
+                data={"caption": "An older signal returns. Which version still speaks?", "hashtags": "ChloKat"},
+                follow_redirects=True,
+            )
+
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"Threads published.", response.data)
+        refresh.assert_called_once_with("social/older-signal.jpg")
+        with self.app.app_context():
+            saved = get_session().get(PostDraft, draft_id)
+            self.assertEqual(
+                "https://fresh.example.test/older-signal.jpg",
+                saved.artifact.generated_metadata["public_media_url"],
+            )
 
     def test_threads_oauth_start_redirects_to_threads_authorize_url(self):
         response = self.client.get("/oauth/threads/start")
@@ -524,12 +611,89 @@ class RoutesTest(unittest.TestCase):
         )
 
         self.assertEqual(200, response.status_code)
-        self.assertIn(b"Publishing to X and FanVue has started", response.data)
+        self.assertIn(b"Publishing to all connected platforms has started", response.data)
         command = popen.call_args.args[0]
         self.assertEqual(
             ["publish-daily-fragment-run", "--run-id", "publish-signal"],
             command[-3:],
         )
+
+    def test_library_approved_threads_pill_publishes_saved_draft(self):
+        with self.app.app_context():
+            session = get_session()
+            artifact = Artifact(
+                title="One-click Threads Signal",
+                fragment_code="daily-fragment-run-one-click-threads",
+                media_path="/missing/one-click.jpg",
+                media_content_type="image/jpeg",
+                generated_metadata={"public_media_url": "https://cdn.example.test/one-click.jpg"},
+            )
+            session.add(artifact)
+            session.flush()
+            draft = PostDraft(
+                artifact=artifact,
+                platform="threads",
+                caption="The old signal is ready. Which part still remembers?",
+                hashtags=["ChloKat"],
+                status="approved",
+            )
+            session.add(draft)
+            session.commit()
+            draft_id = draft.id
+
+        library = self.client.get("/")
+        self.assertIn(f'/drafts/{draft_id}/publish-from-library'.encode(), library.data)
+        self.assertIn(b"Threads \xc2\xb7 approved", library.data)
+
+        response = self.client.post(
+            f"/drafts/{draft_id}/publish-from-library",
+            follow_redirects=True,
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"Threads published.", response.data)
+        with self.app.app_context():
+            saved = get_session().get(PostDraft, draft_id)
+            self.assertEqual("published", saved.status)
+            self.assertEqual(1, len(saved.publications))
+            self.assertTrue(saved.publications[0].external_post_id.startswith("dry-run-threads-"))
+
+    def test_library_publish_refuses_duplicate_successful_publication(self):
+        with self.app.app_context():
+            session = get_session()
+            artifact = Artifact(title="Already Sent")
+            session.add(artifact)
+            session.flush()
+            draft = PostDraft(
+                artifact=artifact,
+                platform="threads",
+                caption="Do not duplicate me?",
+                status="failed",
+            )
+            session.add(draft)
+            session.flush()
+            session.add(
+                PostPublication(
+                    post_draft=draft,
+                    platform="threads",
+                    status="published",
+                    external_post_id="existing-thread-id",
+                )
+            )
+            session.commit()
+            draft_id = draft.id
+
+        response = self.client.post(
+            f"/drafts/{draft_id}/publish-from-library",
+            follow_redirects=True,
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"already published; no duplicate was created", response.data)
+        with self.app.app_context():
+            saved = get_session().get(PostDraft, draft_id)
+            self.assertEqual("published", saved.status)
+            self.assertEqual(1, len(saved.publications))
 
     def test_metrics_dashboard_displays_published_post_snapshot(self):
         with self.app.app_context():
@@ -572,7 +736,12 @@ class RoutesTest(unittest.TestCase):
         response = self.client.get("/metrics")
 
         self.assertEqual(200, response.status_code)
-        self.assertIn(b"Post Metrics", response.data)
+        self.assertIn(b"Signal Room", response.data)
+        self.assertIn(b"Account-wide leaders", response.data)
+        self.assertIn(b"Posts earning attention", response.data)
+        self.assertIn(b"performance-grid", response.data)
+        self.assertIn(b"Export CSV", response.data)
+        self.assertIn(b"Daily metrics poller", response.data)
         self.assertIn(b"Metric Window", response.data)
         self.assertIn(b"facebook-post-2", response.data)
         self.assertIn(b"100", response.data)

@@ -6,6 +6,8 @@ import json
 import click
 import os
 import requests
+import secrets
+from datetime import timedelta
 
 from .db import close_session, configure_database, init_db
 from .models import Artifact, PostDraft, PostPublication
@@ -27,6 +29,8 @@ from .services.daily_fragment_workflow import (
     store_daily_fragment_package,
 )
 from .services.post_metrics import PostMetricsPoller
+from .services.account_analytics_runner import AccountAnalyticsRunner
+from .services.meta_token_manager import MetaTokenManager
 from .services.sample_artifact_importer import SampleArtifactImporter
 from .services.social_post_importer import SocialPostImporter
 from .services.threads_oauth import ThreadsOAuth
@@ -53,6 +57,11 @@ def create_app(config_overrides=None):
     app.config.setdefault("FACEBOOK_DRY_RUN", os.getenv("FACEBOOK_DRY_RUN", "true").lower() != "false")
     app.config.setdefault("FACEBOOK_PAGE_ID", os.getenv("FACEBOOK_PAGE_ID", ""))
     app.config.setdefault("FACEBOOK_PAGE_ACCESS_TOKEN", os.getenv("FACEBOOK_PAGE_ACCESS_TOKEN", ""))
+    app.config.setdefault("META_USER_ACCESS_TOKEN", os.getenv("META_USER_ACCESS_TOKEN", ""))
+    app.config.setdefault(
+        "META_SHORT_LIVED_USER_ACCESS_TOKEN",
+        os.getenv("META_SHORT_LIVED_USER_ACCESS_TOKEN", ""),
+    )
     app.config.setdefault("INSTAGRAM_GRAPH_VERSION", os.getenv("INSTAGRAM_GRAPH_VERSION", "v20.0"))
     app.config.setdefault("INSTAGRAM_DRY_RUN", os.getenv("INSTAGRAM_DRY_RUN", "true").lower() != "false")
     app.config.setdefault("INSTAGRAM_USER_ID", os.getenv("INSTAGRAM_USER_ID", ""))
@@ -79,6 +88,19 @@ def create_app(config_overrides=None):
     app.config.setdefault("FANVUE_APP_ID", os.getenv("FANVUE_APP_ID", ""))
     app.config.setdefault("FANVUE_CLIENT_ID", os.getenv("FANVUE_CLIENT_ID", ""))
     app.config.setdefault("FANVUE_CLIENT_SECRET", os.getenv("FANVUE_CLIENT_SECRET", ""))
+    app.config.setdefault("TIKTOK_CLIENT_KEY", os.getenv("TIKTOK_CLIENT_KEY", ""))
+    app.config.setdefault("TIKTOK_CLIENT_SECRET", os.getenv("TIKTOK_CLIENT_SECRET", ""))
+    app.config.setdefault("TIKTOK_REDIRECT_URI", os.getenv("TIKTOK_REDIRECT_URI", ""))
+    app.config.setdefault("TIKTOK_TOKEN_PATH", os.getenv("TIKTOK_TOKEN_PATH", str(project_root / "instance" / "tiktok_oauth.json")))
+    app.config.setdefault("YOUTUBE_CLIENT_ID", os.getenv("YOUTUBE_CLIENT_ID", ""))
+    app.config.setdefault("YOUTUBE_CLIENT_SECRET", os.getenv("YOUTUBE_CLIENT_SECRET", ""))
+    app.config.setdefault("YOUTUBE_REDIRECT_URI", os.getenv("YOUTUBE_REDIRECT_URI", ""))
+    app.config.setdefault("YOUTUBE_TOKEN_PATH", os.getenv("YOUTUBE_TOKEN_PATH", str(project_root / "instance" / "youtube_oauth.json")))
+    app.config.setdefault("CREATOR_AUTH_REQUIRED", os.getenv("CREATOR_AUTH_REQUIRED", "false").lower() == "true")
+    app.config.setdefault("GOOGLE_OAUTH_CLIENT_ID", os.getenv("GOOGLE_OAUTH_CLIENT_ID", ""))
+    app.config.setdefault("GOOGLE_OAUTH_CLIENT_SECRET", os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", ""))
+    app.config.setdefault("GOOGLE_OAUTH_REDIRECT_URI", os.getenv("GOOGLE_OAUTH_REDIRECT_URI", ""))
+    app.config.setdefault("GOOGLE_ALLOWED_EMAILS", os.getenv("GOOGLE_ALLOWED_EMAILS", ""))
     app.config.setdefault("FANVUE_REDIRECT_URI", os.getenv("FANVUE_REDIRECT_URI", ""))
     app.config.setdefault(
         "FANVUE_TOKEN_PATH", os.getenv("FANVUE_TOKEN_PATH", str(project_root / "instance" / "fanvue_oauth.json"))
@@ -91,10 +113,21 @@ def create_app(config_overrides=None):
     app.config.setdefault("S3_MEDIA_PREFIX", os.getenv("S3_MEDIA_PREFIX", "social"))
     app.config.setdefault("S3_PRESIGN_SECONDS", int(os.getenv("S3_PRESIGN_SECONDS", "3600")))
     if not app.config.get("SECRET_KEY"):
-        app.config["SECRET_KEY"] = "creator-frikshun-local-dev"
+        secret_path = Path(app.instance_path) / "creator_session_secret"
+        secret_path.parent.mkdir(parents=True, exist_ok=True)
+        if not secret_path.exists():
+            secret_path.write_text(secrets.token_urlsafe(48))
+            secret_path.chmod(0o600)
+        app.config["SECRET_KEY"] = secret_path.read_text().strip()
+    app.config.setdefault("SESSION_COOKIE_HTTPONLY", True)
+    app.config.setdefault("SESSION_COOKIE_SAMESITE", "Lax")
+    app.config.setdefault("SESSION_COOKIE_SECURE", os.getenv("SESSION_COOKIE_SECURE", "false").lower() == "true")
+    app.config.setdefault("PERMANENT_SESSION_LIFETIME", timedelta(hours=12))
 
     if config_overrides:
         app.config.update(config_overrides)
+        if config_overrides.get("TESTING") and "CREATOR_AUTH_REQUIRED" not in config_overrides:
+            app.config["CREATOR_AUTH_REQUIRED"] = False
     facebook_dry_run_overridden = (config_overrides or {}).get("FACEBOOK_DRY_RUN") is False
     instagram_dry_run_overridden = (config_overrides or {}).get("INSTAGRAM_DRY_RUN") is False
     threads_dry_run_overridden = (config_overrides or {}).get("THREADS_DRY_RUN") is False
@@ -154,16 +187,73 @@ def create_app(config_overrides=None):
     def poll_post_metrics_command():
         from .db import get_session
 
-        result = PostMetricsPoller(get_session()).run()
+        session = get_session()
+        result = PostMetricsPoller(session).run()
+        account_result = AccountAnalyticsRunner(session, app.config).run()
         click.echo(
             "Metrics poll complete: "
             f"{result.snapshots_created} snapshots, "
             f"{result.interactions_created} new interactions, "
             f"{result.interactions_updated} updated interactions, "
+            f"{result.marked_unpublished} missing posts returned to approved, "
             f"{result.skipped} skipped, {len(result.errors)} errors."
         )
+        for platform, platform_result in account_result.platform_results.items():
+            click.echo(
+                f"{platform.title()} account sync complete: "
+                f"{platform_result.account_snapshots} account snapshots, "
+                f"{platform_result.discovered} content discovered, "
+                f"{platform_result.content_snapshots} content snapshots, "
+                f"{len(platform_result.errors)} errors."
+            )
         for error in result.errors:
             click.echo(f"ERROR: {error}", err=True)
+        for error in account_result.errors:
+            click.echo(f"ERROR: {error}", err=True)
+
+    @app.cli.command("sync-account-analytics")
+    @click.option("--platform", type=click.Choice(["youtube", "tiktok"]), multiple=True)
+    def sync_account_analytics_command(platform):
+        """Collect account-wide and individual-content analytics."""
+        from .db import get_session
+
+        result = AccountAnalyticsRunner(get_session(), app.config).run(platforms=platform or None)
+        for name, platform_result in result.platform_results.items():
+            click.echo(
+                f"{name.title()} sync complete: "
+                f"{platform_result.account_snapshots} account snapshots, "
+                f"{platform_result.discovered} content discovered, "
+                f"{platform_result.content_snapshots} content snapshots, "
+                f"{platform_result.unavailable} unavailable, "
+                f"{len(platform_result.errors)} errors."
+            )
+        for name, reason in result.skipped.items():
+            click.echo(f"{name.title()} skipped: {reason}.")
+        for error in result.errors:
+            click.echo(f"ERROR: {error}", err=True)
+
+    @app.cli.command("upgrade-meta-tokens")
+    def upgrade_meta_tokens_command():
+        """Exchange the current Meta user token and persist long-lived user/Page tokens."""
+        manager = MetaTokenManager(
+            app_id=os.getenv("META_APP_ID"),
+            app_secret=os.getenv("META_APP_SECRET"),
+            page_id=app.config.get("FACEBOOK_PAGE_ID"),
+            graph_version=app.config.get("FACEBOOK_GRAPH_VERSION"),
+            env_path=project_root / ".env",
+        )
+        try:
+            result = manager.upgrade(
+                app.config.get("META_SHORT_LIVED_USER_ACCESS_TOKEN")
+                or app.config.get("META_USER_ACCESS_TOKEN")
+                or app.config.get("INSTAGRAM_ACCESS_TOKEN")
+            )
+        except (requests.RequestException, ValueError, OSError) as error:
+            raise click.ClickException(str(error))
+        click.echo(
+            f"Meta long-lived tokens saved for Page {result['page_name'] or result['page_id']}; "
+            f"user token expires at {result['expires_at'] or 'not reported'}."
+        )
 
     @app.cli.command("check-daily-fragment-readiness")
     def check_daily_fragment_readiness_command():

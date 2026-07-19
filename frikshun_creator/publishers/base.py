@@ -41,6 +41,36 @@ class PostInteractionData:
     raw_payload: dict = field(default_factory=dict)
 
 
+@dataclass
+class RemoteContentData:
+    external_content_id: str
+    content_type: str = "post"
+    title: str = ""
+    body: str = ""
+    permalink: str = ""
+    thumbnail_url: str = ""
+    published_at: Optional[datetime] = None
+    metadata: dict = field(default_factory=dict)
+
+
+@dataclass
+class ContentDiscoveryPage:
+    items: list[RemoteContentData] = field(default_factory=list)
+    next_cursor: str = ""
+
+
+@dataclass
+class AccountMetricsData:
+    followers: int = 0
+    following: int = 0
+    content_count: int = 0
+    views: int = 0
+    reach: int = 0
+    engagements: int = 0
+    profile_views: int = 0
+    metrics: dict = field(default_factory=dict)
+
+
 class PublisherAdapter:
     platform = "base"
 
@@ -72,3 +102,12 @@ class PublisherAdapter:
 
     def fetch_post_interactions(self, post_publication):
         return []
+
+    def discover_account_content(self, cursor="", limit=100):
+        raise NotImplementedError
+
+    def fetch_account_metrics(self):
+        raise NotImplementedError
+
+    def fetch_remote_content_metrics(self, remote_content):
+        raise NotImplementedError

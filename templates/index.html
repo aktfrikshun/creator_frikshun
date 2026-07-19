@@ -181,6 +181,9 @@
       .excerpt { margin: 14px 0 0; color: #5f5853; font-size: 14px; line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
       .generation-warning { margin: 12px 0 0; padding: 9px 11px; border-radius: 9px; color: #7c4d17; background: #fff4dc; font-size: 12px; }
       .platforms { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 16px; }
+      .platforms form { margin: 0; }
+      .pill-button { font: inherit; cursor: pointer; }
+      .pill-button:hover { filter: brightness(.97); transform: translateY(-1px); }
       .pill.published { color: #2f6950; border-color: #bed5c8; background: #eef7f1; }
       .pill.failed { color: #922c39; border-color: #e5bec4; background: #fff1f3; }
       .pill.approved { color: #6f5124; border-color: #dfcfab; background: #fbf5e6; }
@@ -233,6 +236,7 @@
         <nav class="nav" aria-label="Primary navigation">
           <a href="{{ url_for('creator.index') }}">Posts</a>
           <a href="{{ url_for('creator.metrics_dashboard') }}">Metrics</a>
+          {% if session.get('creator_user') %}<a href="{{ url_for('creator.google_logout') }}">Sign out</a>{% endif %}
         </nav>
       </header>
 
@@ -240,7 +244,7 @@
         <div>
           <p class="eyebrow">Daily recovered fragment</p>
           <h2 id="hero-title">Create the next signal.</h2>
-          <p class="hero-copy">One action generates today’s writing and artwork, publishes it to X and FanVue, and saves manual-ready versions for Facebook, Instagram, and Threads.</p>
+          <p class="hero-copy">One action generates today’s writing and artwork, then publishes it across Facebook, Instagram, Threads, X, and FanVue.</p>
         </div>
         <form class="generate" action="{{ url_for('creator.generate_daily_fragment') }}" method="post">
           <label for="creation-family">Post family</label>
@@ -265,8 +269,14 @@
             <p>{{ post_count }} post{% if post_count != 1 %}s{% endif %} found · Search writing, titles, and recovered fragments.</p>
           </div>
           <div class="connection" aria-label="Automatic publishing status">
+            <span><i></i> Facebook {{ publishing_status.facebook }}</span>
+            <span><i></i> Instagram {{ publishing_status.instagram }}</span>
+            <span><i></i> Threads {{ publishing_status.threads }}</span>
             <span><i></i> X {{ publishing_status.x }}</span>
             <span><i></i> FanVue {{ publishing_status.fanvue }}</span>
+            {% for account in analytics_accounts if account.platform in ('tiktok', 'youtube') %}
+              <span title="{{ account.publishing_mode|title }} publishing · analytics {{ account.analytics_status }}"><i></i> {{ account.platform|title }} analytics {{ account.analytics_status }}</span>
+            {% endfor %}
           </div>
         </div>
 
@@ -323,7 +333,15 @@
 
                 <div class="platforms" aria-label="Platform drafts">
                   {% for draft in post.post_drafts if not draft.archived %}
-                    <span class="pill {{ draft.status }}"><a href="{{ url_for('creator.review_draft', draft_id=draft.id) }}">{{ draft.platform|title }} · {{ draft.status }}</a></span>
+                    {% if draft.status in ['approved', 'failed'] and draft.platform in ['facebook', 'instagram', 'threads', 'x', 'fanvue'] %}
+                      <form action="{{ url_for('creator.publish_draft_from_library', draft_id=draft.id) }}" method="post">
+                        <button class="pill pill-button {{ draft.status }}" type="submit" title="Publish this saved {{ draft.platform|title }} draft">
+                          {{ draft.platform|title }} · {{ draft.status }}
+                        </button>
+                      </form>
+                    {% else %}
+                      <span class="pill {{ draft.status }}"><a href="{{ url_for('creator.review_draft', draft_id=draft.id) }}">{{ draft.platform|title }} · {{ draft.status }}</a></span>
+                    {% endif %}
                   {% endfor %}
                 </div>
 
@@ -353,7 +371,11 @@
 
       <footer>
         <span>{{ canon_count }} canon entries available to generation.</span>
-        <span>Meta platforms are manual-only.</span>
+        <span>
+          <a href="{{ url_for('creator.terms') }}">Terms</a> ·
+          <a href="{{ url_for('creator.privacy') }}">Privacy</a> ·
+          <a href="{{ url_for('creator.acceptable_use') }}">Acceptable Use</a>
+        </span>
       </footer>
     </main>
   </body>

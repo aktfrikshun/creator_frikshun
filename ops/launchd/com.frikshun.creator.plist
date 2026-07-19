@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.frikshun.creator</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/allentaylor/src/creator_frikshun/.venv/bin/flask</string>
+    <string>--app</string>
+    <string>app</string>
+    <string>run</string>
+    <string>--host</string>
+    <string>127.0.0.1</string>
+    <string>--port</string>
+    <string>5050</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/allentaylor/src/creator_frikshun</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/allentaylor/Library/Logs/FrikShun/creator.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/allentaylor/Library/Logs/FrikShun/creator-error.log</string>
+</dict>
+</plist>

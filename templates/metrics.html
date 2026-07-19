@@ -3,245 +3,451 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Post Metrics</title>
+    <title>Signal Room · Creator OS</title>
+    <script src="https://cdn.jsdelivr.net/npm/ag-grid-community@36.0.1/dist/ag-grid-community.min.js"></script>
     <style>
+      :root {
+        --ink: #201d1b;
+        --muted: #716b66;
+        --paper: #f4f0e9;
+        --panel: rgba(255, 253, 249, .92);
+        --line: #ded6cb;
+        --red: #a82f3d;
+        --red-dark: #812331;
+        --green: #276c57;
+        --shadow: 0 18px 45px rgba(55, 43, 35, .09);
+      }
+
+      * { box-sizing: border-box; }
       body {
         margin: 0;
-        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        background: #101114;
-        color: #f4f1ea;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at 93% 0, rgba(168, 47, 61, .11), transparent 28rem),
+          var(--paper);
+        font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      button, input { font: inherit; }
+      button:focus-visible, input:focus-visible, a:focus-visible {
+        outline: 3px solid rgba(168, 47, 61, .3);
+        outline-offset: 3px;
       }
 
-      main {
-        max-width: 1180px;
-        margin: 0 auto;
-        padding: 32px 20px 48px;
+      .shell { max-width: 1480px; margin: 0 auto; padding: 24px 28px 56px; }
+      .back {
+        display: inline-flex; align-items: center; gap: 8px; color: #5f5751;
+        text-decoration: none; font-size: 14px; font-weight: 750;
       }
-
-      a {
-        color: #f4f1ea;
+      .back:hover { color: var(--red); }
+      .topbar { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 24px; }
+      .sign-out { color: #766e68; font-size: 13px; font-weight: 750; text-decoration: none; }
+      .sign-out:hover { color: var(--red); }
+      .hero {
+        position: relative; overflow: hidden; padding: 34px 36px; border-radius: 24px;
+        color: #fffaf3; background: linear-gradient(125deg, #211d1d 0%, #392126 62%, #772937 150%);
+        box-shadow: var(--shadow);
       }
-
-      h1 {
-        margin: 14px 0 8px;
-        font-size: 34px;
-        letter-spacing: 0;
+      .hero::after {
+        content: ""; position: absolute; width: 360px; height: 360px; right: -130px; top: -190px;
+        border: 1px solid rgba(255,255,255,.13); border-radius: 50%; box-shadow: 0 0 0 55px rgba(255,255,255,.025);
       }
-
-      h2 {
-        margin: 0 0 14px;
-        font-size: 20px;
-      }
-
-      p,
-      small,
-      th,
-      td {
-        color: #c8c1b6;
-      }
-
-      .topbar {
-        display: flex;
-        justify-content: space-between;
-        gap: 16px;
-        align-items: end;
-        flex-wrap: wrap;
-      }
-
-      form {
-        margin: 0;
-      }
-
-      button,
+      .hero-row { position: relative; z-index: 1; display: flex; justify-content: space-between; align-items: end; gap: 30px; }
+      .eyebrow { margin: 0 0 8px; color: #e9b3b9; font-size: 12px; font-weight: 850; letter-spacing: .18em; text-transform: uppercase; }
+      h1 { margin: 0; font-family: Georgia, serif; font-size: clamp(38px, 5vw, 62px); font-weight: 500; letter-spacing: -.035em; }
+      .hero-copy { max-width: 700px; margin: 12px 0 0; color: #d9cfca; font-size: 16px; line-height: 1.6; }
+      .actions { display: flex; gap: 10px; flex-wrap: wrap; }
       .button {
-        border: 0;
-        border-radius: 8px;
-        padding: 10px 13px;
-        background: #d34d56;
-        color: #fff;
-        font: inherit;
-        font-weight: 800;
-        text-decoration: none;
-        cursor: pointer;
+        display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 43px;
+        border: 1px solid transparent; border-radius: 999px; padding: 10px 17px; color: white;
+        background: var(--red); text-decoration: none; font-weight: 800; cursor: pointer; white-space: nowrap;
       }
+      .button:hover { background: var(--red-dark); }
+      .button.secondary { border-color: rgba(255,255,255,.28); background: rgba(255,255,255,.08); }
+      .button.secondary:hover { background: rgba(255,255,255,.15); }
 
-      .panel {
-        margin-top: 24px;
-        border: 1px solid #343841;
-        border-radius: 8px;
-        background: #181a1f;
-        padding: 18px;
-        overflow-x: auto;
+      .summaries { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 14px; margin: 18px 0 26px; }
+      .summary-card { padding: 19px 20px; border: 1px solid var(--line); border-radius: 16px; background: var(--panel); box-shadow: 0 8px 24px rgba(55,43,35,.04); }
+      .summary-label { color: var(--muted); font-size: 12px; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; }
+      .summary-value { display: block; margin-top: 7px; font-family: Georgia, serif; font-size: 30px; line-height: 1; }
+      .summary-note { display: block; margin-top: 7px; color: #8b837d; font-size: 12px; }
+
+      .platform-section { display: grid; grid-template-columns: minmax(420px, .9fr) minmax(520px, 1.45fr); gap: 16px; margin-bottom: 26px; }
+      .insight-panel { border: 1px solid var(--line); border-radius: 20px; background: var(--panel); box-shadow: var(--shadow); overflow: hidden; }
+      .insight-head { display: flex; justify-content: space-between; gap: 16px; align-items: start; padding: 21px 22px 15px; }
+      .insight-head h2 { margin: 0; font-family: Georgia, serif; font-size: 25px; font-weight: 500; }
+      .insight-head p { margin: 5px 0 0; color: var(--muted); font-size: 13px; }
+      .leaderboard { padding: 0 14px 14px; }
+      .platform-row { display: grid; grid-template-columns: 28px minmax(100px, 1fr) auto auto; gap: 12px; align-items: center; padding: 14px 8px; border-top: 1px solid #e9e2d9; }
+      .rank { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; color: #786f68; background: #eee8e0; font-size: 11px; font-weight: 850; }
+      .platform-name { text-transform: capitalize; font-weight: 850; }
+      .platform-detail { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; font-weight: 500; }
+      .platform-metric { text-align: right; }
+      .platform-metric strong { display: block; font-size: 17px; }
+      .platform-metric span { color: var(--muted); font-size: 10px; font-weight: 750; text-transform: uppercase; }
+      .growth { min-width: 70px; border-radius: 999px; padding: 6px 9px; color: var(--green); background: #eaf4f0; text-align: center; font-size: 12px; font-weight: 850; }
+      .growth.flat { color: #756e68; background: #eeeae5; }
+      .trend-wrap { padding: 2px 20px 18px; }
+      .trend-legend { display: flex; gap: 15px; flex-wrap: wrap; margin-bottom: 10px; }
+      .legend-item { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; font-weight: 750; text-transform: capitalize; }
+      .legend-dot { width: 9px; height: 9px; border-radius: 50%; }
+      .trend-chart { width: 100%; height: 245px; overflow: visible; }
+      .chart-empty { display: grid; place-items: center; height: 245px; color: var(--muted); font-size: 13px; }
+      .top-posts { grid-column: 1 / -1; }
+      .metric-switcher { display: flex; gap: 5px; flex-wrap: wrap; }
+      .metric-switcher button { border: 1px solid #d6cdc2; border-radius: 999px; padding: 6px 10px; color: var(--muted); background: #fff; font-size: 11px; font-weight: 800; cursor: pointer; text-transform: capitalize; }
+      .metric-switcher button.active { border-color: var(--red); color: #fff; background: var(--red); }
+      .post-ranking { display: grid; grid-template-columns: repeat(5, minmax(150px, 1fr)); gap: 10px; padding: 0 18px 18px; }
+      .ranked-post { position: relative; min-height: 135px; padding: 16px; border: 1px solid #e3dbd1; border-radius: 14px; background: #fffdf9; overflow: hidden; }
+      .ranked-post::after { content: ""; position: absolute; left: 0; bottom: 0; width: var(--score); height: 4px; background: var(--red); }
+      .ranked-platform { color: var(--red); font-size: 10px; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; }
+      .ranked-title { display: -webkit-box; margin-top: 9px; overflow: hidden; color: var(--ink); font-family: Georgia, serif; font-size: 16px; line-height: 1.25; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+      .ranked-value { display: block; margin-top: 14px; font-size: 20px; }
+
+      .flash-stack { display: grid; gap: 9px; margin: 18px 0 0; }
+      .flash { padding: 12px 15px; border: 1px solid #b9d4ca; border-radius: 12px; color: #225a49; background: #edf6f2; font-size: 14px; line-height: 1.45; }
+      .flash.error { border-color: #e3bac0; color: #832c39; background: #fff0f1; }
+      .poll-heartbeat { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin: 14px 0 0; padding: 12px 16px; border: 1px solid #b9d4ca; border-radius: 13px; color: #285e4d; background: #edf6f2; font-size: 13px; }
+      .poll-heartbeat.stale, .poll-heartbeat.failed { border-color: #e3bac0; color: #832c39; background: #fff0f1; }
+      .heartbeat-label { display: inline-flex; align-items: center; gap: 9px; font-weight: 850; }
+      .heartbeat-dot { width: 9px; height: 9px; border-radius: 50%; background: #2b8065; box-shadow: 0 0 0 4px rgba(43,128,101,.12); }
+      .stale .heartbeat-dot, .failed .heartbeat-dot { background: #b23949; box-shadow: 0 0 0 4px rgba(178,57,73,.12); }
+
+      .workspace { border: 1px solid var(--line); border-radius: 20px; background: var(--panel); box-shadow: var(--shadow); overflow: hidden; }
+      .workspace-head { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 22px 24px 16px; }
+      .workspace-head h2 { margin: 0; font-family: Georgia, serif; font-size: 27px; font-weight: 500; }
+      .workspace-head p { margin: 5px 0 0; color: var(--muted); font-size: 14px; }
+      .tools { display: flex; align-items: center; justify-content: flex-end; gap: 9px; flex-wrap: wrap; }
+      .search { width: min(280px, 45vw); min-height: 41px; padding: 9px 14px 9px 38px; border: 1px solid #d5ccc1; border-radius: 999px; color: var(--ink); background: #fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='none' stroke='%23716b66' stroke-width='2'%3E%3Ccircle cx='7' cy='7' r='5'/%3E%3Cpath d='m11 11 4 4'/%3E%3C/svg%3E") no-repeat 14px center; }
+      .tool-button { min-height: 41px; border: 1px solid #cfc5b9; border-radius: 999px; padding: 8px 14px; color: #4e4742; background: #fff; font-weight: 750; cursor: pointer; }
+      .tool-button:hover { border-color: var(--red); color: var(--red); }
+      .tabs { display: flex; gap: 5px; padding: 0 24px; border-bottom: 1px solid var(--line); }
+      .tab { border: 0; border-bottom: 3px solid transparent; padding: 12px 14px; color: var(--muted); background: transparent; font-weight: 800; cursor: pointer; }
+      .tab.active { border-bottom-color: var(--red); color: var(--ink); }
+      .tab-count { display: inline-flex; align-items: center; justify-content: center; min-width: 22px; height: 22px; margin-left: 6px; border-radius: 99px; color: #776f68; background: #ece6dd; font-size: 11px; }
+      .tab-panel { padding: 18px; }
+      .tab-panel[hidden] { display: none; }
+      .grid { width: 100%; height: 590px; }
+      .grid.interactions { height: 520px; }
+      .fallback { overflow-x: auto; }
+      .fallback table { width: 100%; border-collapse: collapse; min-width: 850px; }
+      .fallback th, .fallback td { padding: 10px; border-bottom: 1px solid var(--line); text-align: left; font-size: 13px; }
+      .fallback th { color: var(--muted); text-transform: uppercase; font-size: 11px; }
+      .empty { display: grid; place-items: center; min-height: 240px; color: var(--muted); text-align: center; }
+      .footer-note { margin: 13px 4px 0; color: #877f78; font-size: 12px; }
+
+      @media (max-width: 1000px) {
+        .summaries { grid-template-columns: repeat(3, 1fr); }
+        .platform-section { grid-template-columns: 1fr; }
+        .post-ranking { grid-template-columns: repeat(2, 1fr); }
+        .hero-row, .workspace-head { align-items: flex-start; flex-direction: column; }
+        .tools { justify-content: flex-start; width: 100%; }
       }
-
-      .flash {
-        border-radius: 8px;
-        padding: 10px 12px;
-        margin: 16px 0 0;
-        background: #223128;
-        color: #d7f7df;
-      }
-
-      .flash.error {
-        background: #3a2225;
-        color: #ffd5d9;
-      }
-
-      table {
-        width: 100%;
-        border-collapse: collapse;
-        min-width: 860px;
-      }
-
-      th,
-      td {
-        border-bottom: 1px solid #30343c;
-        padding: 10px 8px;
-        text-align: left;
-        vertical-align: top;
-      }
-
-      th {
-        color: #f4f1ea;
-        font-size: 12px;
-        text-transform: uppercase;
-      }
-
-      .metric {
-        color: #f4f1ea;
-        font-weight: 800;
-      }
-
-      .status {
-        display: inline-block;
-        border-radius: 999px;
-        padding: 4px 8px;
-        background: #282c34;
-        color: #f4f1ea;
-        font-size: 12px;
-        white-space: nowrap;
-      }
-
-      .body {
-        max-width: 380px;
-        white-space: pre-wrap;
-      }
-
-      .empty {
-        color: #9ca3af;
+      @media (max-width: 680px) {
+        .shell { padding: 16px 12px 36px; }
+        .hero { padding: 26px 22px; border-radius: 18px; }
+        .summaries { grid-template-columns: repeat(2, 1fr); }
+        .summary-card:first-child { grid-column: span 2; }
+        .workspace-head { padding: 18px 16px 12px; }
+        .tabs { padding: 0 10px; overflow-x: auto; }
+        .tab-panel { padding: 10px; }
+        .search { width: 100%; max-width: none; }
+        .tools { display: grid; grid-template-columns: 1fr 1fr; }
+        .tools .search { grid-column: span 2; }
+        .post-ranking { grid-template-columns: 1fr; }
       }
     </style>
   </head>
   <body>
-    <main>
-      <a href="{{ url_for('creator.index') }}">Back to Creator OS</a>
-      <div class="topbar">
-        <div>
-          <h1>Post Metrics</h1>
-          <p>Published post snapshots and incoming interaction review.</p>
+    <main class="shell">
+      <nav class="topbar" aria-label="Creator OS navigation">
+        <a class="back" href="{{ url_for('creator.index') }}" aria-label="Back to Creator OS">← Creator OS</a>
+        {% if session.get('creator_user') %}<a class="sign-out" href="{{ url_for('creator.google_logout') }}">Sign out {{ session['creator_user'].get('name') or session['creator_user']['email'] }}</a>{% endif %}
+      </nav>
+
+      <section class="hero">
+        <div class="hero-row">
+          <div>
+            <p class="eyebrow">Performance intelligence</p>
+            <h1>Signal Room</h1>
+            <p class="hero-copy">A live view of what landed, what moved, and where the audience answered back.</p>
+          </div>
+          <div class="actions">
+            <button class="button secondary" id="hero-export" type="button">Export current view</button>
+            <form action="{{ url_for('creator.poll_metrics') }}" method="post">
+              <button class="button" type="submit">↻ Poll live metrics</button>
+            </form>
+          </div>
         </div>
-        <form action="{{ url_for('creator.poll_metrics') }}" method="post">
-          <button type="submit">Poll Live Metrics</button>
-        </form>
-      </div>
-
-      {% for category, message in get_flashed_messages(with_categories=true) %}
-        <div class="flash {{ category }}">{{ message }}</div>
-      {% endfor %}
-
-      <section class="panel" aria-label="Published post metrics">
-        <h2>Published Posts</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>Post</th>
-              <th>Platform</th>
-              <th>Views</th>
-              <th>Reach</th>
-              <th>Likes</th>
-              <th>Comments</th>
-              <th>Shares</th>
-              <th>Saves</th>
-              <th>Clicks</th>
-              <th>Fetched</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for publication in publications %}
-              {% set snapshot = latest_snapshots[publication.id] %}
-              <tr>
-                <td>
-                  <strong>{{ publication.post_draft.artifact.title }}</strong><br>
-                  <small>{{ publication.external_post_id }}</small>
-                  {% if publication.external_url %}
-                    <br><a href="{{ publication.external_url }}">Open post</a>
-                  {% endif %}
-                </td>
-                <td><span class="status">{{ publication.platform }}</span></td>
-                <td class="metric">{{ snapshot.views if snapshot else 0 }}</td>
-                <td class="metric">{{ snapshot.reach if snapshot else 0 }}</td>
-                <td class="metric">{{ snapshot.likes if snapshot else 0 }}</td>
-                <td class="metric">{{ snapshot.comments if snapshot else 0 }}</td>
-                <td class="metric">{{ snapshot.shares if snapshot else 0 }}</td>
-                <td class="metric">{{ snapshot.saves if snapshot else 0 }}</td>
-                <td class="metric">{{ snapshot.clicks if snapshot else 0 }}</td>
-                <td>
-                  {% if snapshot %}
-                    {{ snapshot.fetched_at.strftime("%Y-%m-%d %H:%M") }}
-                  {% else %}
-                    <span class="empty">Not polled yet</span>
-                  {% endif %}
-                </td>
-              </tr>
-            {% else %}
-              <tr>
-                <td colspan="10" class="empty">No published posts have been recorded yet.</td>
-              </tr>
-            {% endfor %}
-          </tbody>
-        </table>
       </section>
 
-      <section class="panel" aria-label="Incoming interactions">
-        <h2>Incoming Comments And Messages</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>Source</th>
-              <th>Author</th>
-              <th>Body</th>
-              <th>Reply Status</th>
-              <th>Received</th>
-              <th>Fetched</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for interaction in interactions %}
-              <tr>
-                <td>
-                  <span class="status">{{ interaction.platform }}</span><br>
-                  <small>{{ interaction.interaction_type }} {{ interaction.external_id }}</small>
-                </td>
-                <td>{{ interaction.author_name or "Unknown" }}</td>
-                <td class="body">{{ interaction.body }}</td>
-                <td><span class="status">{{ interaction.reply_status }}</span></td>
-                <td>
-                  {% if interaction.received_at %}
-                    {{ interaction.received_at.strftime("%Y-%m-%d %H:%M") }}
-                  {% else %}
-                    <span class="empty">Unknown</span>
-                  {% endif %}
-                </td>
-                <td>{{ interaction.fetched_at.strftime("%Y-%m-%d %H:%M") }}</td>
-              </tr>
-            {% else %}
-              <tr>
-                <td colspan="6" class="empty">No comments or messages have been fetched yet.</td>
-              </tr>
-            {% endfor %}
-          </tbody>
-        </table>
+      <aside class="poll-heartbeat{% if latest_poll and latest_poll.status not in ('succeeded', 'partial') %} failed{% endif %}" id="poll-heartbeat" {% if latest_poll and latest_poll.completed_at %}data-completed-at="{{ latest_poll.completed_at.isoformat() }}"{% endif %} aria-live="polite">
+        <span class="heartbeat-label"><i class="heartbeat-dot"></i> Daily metrics poller</span>
+        {% if latest_poll %}
+          <span>Last poll <time data-date="{{ (latest_poll.completed_at or latest_poll.started_at).isoformat() }}">{{ latest_poll.completed_at or latest_poll.started_at }}</time> · {{ latest_poll.status }} · {{ latest_poll.snapshots_created }} snapshots{% if latest_poll.errors_count %} · {{ latest_poll.errors_count }} errors{% endif %}</span>
+        {% else %}
+          <span>No recorded poll yet</span>
+        {% endif %}
+      </aside>
+
+      {% if get_flashed_messages() %}
+        <div class="flash-stack" aria-live="polite">
+          {% for category, message in get_flashed_messages(with_categories=true) %}
+            <div class="flash {{ category }}">{{ message }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+
+      <section class="summaries" aria-label="Performance overview">
+        <article class="summary-card"><span class="summary-label">Live posts</span><strong class="summary-value">{{ "{:,}".format(summary.activePosts) }}</strong><span class="summary-note">currently tracked</span></article>
+        <article class="summary-card"><span class="summary-label">Views</span><strong class="summary-value">{{ "{:,}".format(summary.views) }}</strong><span class="summary-note">latest snapshots</span></article>
+        <article class="summary-card"><span class="summary-label">Reach</span><strong class="summary-value">{{ "{:,}".format(summary.reach) }}</strong><span class="summary-note">latest snapshots</span></article>
+        <article class="summary-card"><span class="summary-label">Engagements</span><strong class="summary-value">{{ "{:,}".format(summary.engagements) }}</strong><span class="summary-note">likes · comments · shares · saves</span></article>
+        <article class="summary-card"><span class="summary-label">Needs review</span><strong class="summary-value">{{ "{:,}".format(summary.pendingInteractions) }}</strong><span class="summary-note">audience interactions</span></article>
       </section>
+
+      <section class="platform-section" aria-label="Platform engagement comparison">
+        <article class="insight-panel">
+          <header class="insight-head">
+            <div><h2>Account-wide leaders</h2><p>Engagement across discovered platform content, including posts published outside Creator OS.</p></div>
+          </header>
+          <div class="leaderboard">
+            {% for platform in platform_summaries %}
+              <div class="platform-row">
+                <span class="rank">{{ loop.index }}</span>
+                <div><span class="platform-name">{{ platform.platform }}</span><span class="platform-detail">{{ platform.posts }} live post{{ "s" if platform.posts != 1 else "" }} · {{ "{:,}".format(platform.views) }} views</span></div>
+                <div class="platform-metric"><strong>{{ "{:,}".format(platform.engagement) }}</strong><span>engagements</span></div>
+                <div class="growth {{ 'flat' if platform.growth == 0 else '' }}">{{ "+" if platform.growth > 0 else "" }}{{ "{:,}".format(platform.growth) }}</div>
+              </div>
+            {% else %}
+              <div class="empty">No platform metrics are available yet.</div>
+            {% endfor %}
+          </div>
+        </article>
+        <article class="insight-panel">
+          <header class="insight-head">
+            <div><h2>Audience momentum</h2><p>Cumulative engagement captured at each daily snapshot, by platform.</p></div>
+          </header>
+          <div class="trend-wrap">
+            <div class="trend-legend" id="trend-legend"></div>
+            <svg class="trend-chart" id="trend-chart" viewBox="0 0 760 245" role="img" aria-label="Platform engagement trends over time"></svg>
+          </div>
+        </article>
+        <article class="insight-panel top-posts">
+          <header class="insight-head">
+            <div><h2>Posts earning attention</h2><p>Rank individual posts by the signal that matters to you.</p></div>
+            <div class="metric-switcher" id="metric-switcher" aria-label="Choose post ranking metric"></div>
+          </header>
+          <div class="post-ranking" id="post-ranking"></div>
+        </article>
+      </section>
+
+      <section class="workspace">
+        <header class="workspace-head">
+          <div>
+            <h2>Publishing intelligence</h2>
+            <p>Sort any column, filter beneath its heading, or search across every field.</p>
+          </div>
+          <div class="tools">
+            <input class="search" id="grid-search" type="search" placeholder="Search posts and interactions" aria-label="Search metrics">
+            <button class="tool-button" id="clear-filters" type="button">Clear filters</button>
+            <button class="tool-button" id="export-csv" type="button">Export CSV</button>
+          </div>
+        </header>
+        <div class="tabs" role="tablist" aria-label="Metrics views">
+          <button class="tab active" id="performance-tab" role="tab" aria-selected="true" aria-controls="performance-panel">Post performance <span class="tab-count">{{ publication_rows|length }}</span></button>
+          <button class="tab" id="interactions-tab" role="tab" aria-selected="false" aria-controls="interactions-panel">Interaction inbox <span class="tab-count">{{ interaction_rows|length }}</span></button>
+        </div>
+
+        <section class="tab-panel" id="performance-panel" role="tabpanel" aria-labelledby="performance-tab">
+          {% if publication_rows %}
+            <div class="grid" id="performance-grid" aria-label="Post performance data grid"></div>
+          {% else %}
+            <div class="empty"><div><strong>No performance data yet.</strong><br>Publish a post, then poll live metrics.</div></div>
+          {% endif %}
+        </section>
+        <section class="tab-panel" id="interactions-panel" role="tabpanel" aria-labelledby="interactions-tab" hidden>
+          {% if interaction_rows %}
+            <div class="grid interactions" id="interactions-grid" aria-label="Audience interactions data grid"></div>
+          {% else %}
+            <div class="empty"><div><strong>The interaction inbox is clear.</strong><br>New comments and messages will appear after a metrics poll.</div></div>
+          {% endif %}
+        </section>
+      </section>
+      <p class="footer-note" id="last-updated">{% if summary.lastFetched %}Last metrics snapshot: <time data-date="{{ summary.lastFetched }}">{{ summary.lastFetched }}</time>{% else %}No metrics snapshots have been fetched yet.{% endif %}</p>
     </main>
+
+    <script id="publication-data" type="application/json">{{ publication_rows|tojson }}</script>
+    <script id="interaction-data" type="application/json">{{ interaction_rows|tojson }}</script>
+    <script id="trend-data" type="application/json">{{ platform_trends|tojson }}</script>
+    <script>
+      (() => {
+        const posts = JSON.parse(document.getElementById("publication-data").textContent);
+        const interactions = JSON.parse(document.getElementById("interaction-data").textContent);
+        const trends = JSON.parse(document.getElementById("trend-data").textContent);
+        const formatNumber = value => Number(value || 0).toLocaleString();
+        const formatDate = value => value ? new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value)) : "Not polled";
+        const dateFormatter = params => formatDate(params.value);
+        const numberFormatter = params => formatNumber(params.value);
+        const titleRenderer = params => {
+          const wrap = document.createElement("div");
+          wrap.style.lineHeight = "1.25";
+          const title = document.createElement(params.data.externalUrl ? "a" : "span");
+          title.textContent = params.value;
+          title.style.fontWeight = "750";
+          title.style.color = "#2b2522";
+          if (params.data.externalUrl) { title.href = params.data.externalUrl; title.target = "_blank"; title.rel = "noopener"; }
+          wrap.appendChild(title);
+          return wrap;
+        };
+        const theme = window.agGrid && agGrid.themeQuartz
+          ? agGrid.themeQuartz.withParams({
+              accentColor: "#a82f3d", backgroundColor: "#fffdf9", foregroundColor: "#302a27",
+              borderColor: "#e3dbd1", headerBackgroundColor: "#f6f1ea", headerTextColor: "#625a54",
+              oddRowBackgroundColor: "#fbf8f3", rowHoverColor: "#f8ecec", fontFamily: "Inter, ui-sans-serif, system-ui",
+              fontSize: 13, headerFontSize: 11, headerFontWeight: 800, spacing: 7, wrapperBorderRadius: 12
+            })
+          : undefined;
+        const common = {
+          theme,
+          defaultColDef: { sortable: true, filter: true, floatingFilter: true, resizable: true, minWidth: 105 },
+          animateRows: true,
+          pagination: true,
+          paginationPageSize: 25,
+          paginationPageSizeSelector: [25, 50, 100],
+          rowHeight: 48,
+          headerHeight: 42,
+          floatingFiltersHeight: 36,
+          ensureDomOrder: true
+        };
+        let performanceApi;
+        let interactionApi;
+        try {
+          if (posts.length && window.agGrid) {
+            performanceApi = agGrid.createGrid(document.getElementById("performance-grid"), {
+              ...common,
+              rowData: posts,
+              columnDefs: [
+                { field: "title", headerName: "Post", pinned: "left", width: 265, minWidth: 210, cellRenderer: titleRenderer },
+                { field: "platform", width: 125 },
+                { field: "status", width: 120 },
+                { field: "views", width: 105, type: "numericColumn", valueFormatter: numberFormatter },
+                { field: "reach", width: 105, type: "numericColumn", valueFormatter: numberFormatter },
+                { field: "likes", width: 100, type: "numericColumn", valueFormatter: numberFormatter },
+                { field: "comments", width: 120, type: "numericColumn", valueFormatter: numberFormatter },
+                { field: "shares", width: 105, type: "numericColumn", valueFormatter: numberFormatter },
+                { field: "saves", width: 100, type: "numericColumn", valueFormatter: numberFormatter },
+                { field: "clicks", width: 100, type: "numericColumn", valueFormatter: numberFormatter },
+                { field: "fetchedAt", headerName: "Last fetched", width: 185, valueFormatter: dateFormatter },
+                { field: "publishedAt", headerName: "Published", width: 185, valueFormatter: dateFormatter },
+                { field: "externalId", headerName: "Platform ID", width: 210, hide: true }
+              ]
+            });
+          }
+          if (interactions.length && window.agGrid) {
+            interactionApi = agGrid.createGrid(document.getElementById("interactions-grid"), {
+              ...common,
+              rowData: interactions,
+              columnDefs: [
+                { field: "platform", pinned: "left", width: 125 },
+                { field: "type", width: 115 },
+                { field: "author", width: 170 },
+                { field: "body", headerName: "Message", minWidth: 320, flex: 1, wrapText: true, autoHeight: true },
+                { field: "replyStatus", headerName: "Review status", width: 155 },
+                { field: "postTitle", headerName: "Post", width: 230 },
+                { field: "receivedAt", headerName: "Received", width: 185, valueFormatter: dateFormatter },
+                { field: "fetchedAt", headerName: "Fetched", width: 185, valueFormatter: dateFormatter },
+                { field: "externalId", headerName: "Platform ID", width: 210, hide: true }
+              ]
+            });
+          }
+        } catch (error) {
+          document.querySelectorAll(".grid").forEach(grid => { grid.innerHTML = `<div class="empty"><div><strong>The interactive grid could not load.</strong><br>${error.message}</div></div>`; });
+        }
+
+        const tabs = [...document.querySelectorAll(".tab")];
+        const activate = tab => {
+          tabs.forEach(item => {
+            const selected = item === tab;
+            item.classList.toggle("active", selected);
+            item.setAttribute("aria-selected", selected);
+            document.getElementById(item.getAttribute("aria-controls")).hidden = !selected;
+          });
+          setTimeout(() => activeApi()?.sizeColumnsToFit(), 0);
+        };
+        tabs.forEach(tab => tab.addEventListener("click", () => activate(tab)));
+        const activeApi = () => document.getElementById("performance-tab").classList.contains("active") ? performanceApi : interactionApi;
+        document.getElementById("grid-search").addEventListener("input", event => {
+          performanceApi?.setGridOption("quickFilterText", event.target.value);
+          interactionApi?.setGridOption("quickFilterText", event.target.value);
+        });
+        document.getElementById("clear-filters").addEventListener("click", () => {
+          document.getElementById("grid-search").value = "";
+          [performanceApi, interactionApi].forEach(api => { api?.setFilterModel(null); api?.setGridOption("quickFilterText", ""); });
+        });
+        const exportActive = () => activeApi()?.exportDataAsCsv({ fileName: document.getElementById("performance-tab").classList.contains("active") ? "chloe-post-metrics.csv" : "chloe-interactions.csv" });
+        document.getElementById("export-csv").addEventListener("click", exportActive);
+        document.getElementById("hero-export").addEventListener("click", exportActive);
+        document.querySelectorAll("time[data-date]").forEach(time => { time.textContent = formatDate(time.dataset.date); });
+        const heartbeat = document.getElementById("poll-heartbeat");
+        if (heartbeat?.dataset.completedAt) {
+          const ageMinutes = (Date.now() - new Date(heartbeat.dataset.completedAt).getTime()) / 60000;
+          if (ageMinutes > 90) {
+            heartbeat.classList.add("stale");
+            heartbeat.querySelector(".heartbeat-label").append(" · overdue");
+          }
+        }
+
+        const rankingMetrics = ["views", "comments", "likes", "shares", "saves", "engagement"];
+        const switcher = document.getElementById("metric-switcher");
+        const ranking = document.getElementById("post-ranking");
+        const metricValue = (post, metric) => metric === "engagement" ? post.likes + post.comments + post.shares + post.saves : Number(post[metric] || 0);
+        const renderRanking = metric => {
+          [...switcher.children].forEach(button => button.classList.toggle("active", button.dataset.metric === metric));
+          const ranked = [...posts].sort((a, b) => metricValue(b, metric) - metricValue(a, metric)).slice(0, 5);
+          const maximum = Math.max(1, ...ranked.map(post => metricValue(post, metric)));
+          ranking.replaceChildren(...ranked.map(post => {
+            const card = document.createElement("article"); card.className = "ranked-post"; card.style.setProperty("--score", `${metricValue(post, metric) / maximum * 100}%`);
+            const platform = document.createElement("span"); platform.className = "ranked-platform"; platform.textContent = post.platform;
+            const title = document.createElement(post.externalUrl ? "a" : "span"); title.className = "ranked-title"; title.textContent = post.title; if (post.externalUrl) { title.href = post.externalUrl; title.target = "_blank"; title.rel = "noopener"; }
+            const value = document.createElement("strong"); value.className = "ranked-value"; value.textContent = `${formatNumber(metricValue(post, metric))} ${metric}`;
+            card.append(platform, title, value); return card;
+          }));
+          if (!ranked.length) ranking.innerHTML = '<div class="empty">No ranked posts yet.</div>';
+        };
+        rankingMetrics.forEach((metric, index) => { const button = document.createElement("button"); button.type = "button"; button.dataset.metric = metric; button.textContent = metric; button.addEventListener("click", () => renderRanking(metric)); switcher.appendChild(button); if (!index) renderRanking(metric); });
+
+        const chart = document.getElementById("trend-chart");
+        const legend = document.getElementById("trend-legend");
+        const colors = ["#a82f3d", "#276c57", "#3b64a1", "#a26925", "#76539b"];
+        const allPoints = trends.flatMap(series => series.points);
+        if (!allPoints.length) {
+          chart.outerHTML = '<div class="chart-empty">Trend lines will appear after more than one metrics poll.</div>';
+        } else {
+          const width = 760, height = 245, left = 44, right = 14, top = 12, bottom = 34;
+          const dates = [...new Set(allPoints.map(point => point.date))];
+          const maxY = Math.max(1, ...allPoints.map(point => point.engagement));
+          const x = index => dates.length === 1 ? left + (width - left - right) / 2 : left + index * (width - left - right) / (dates.length - 1);
+          const y = value => top + (maxY - value) * (height - top - bottom) / maxY;
+          const svgEl = (name, attrs = {}) => { const el = document.createElementNS("http://www.w3.org/2000/svg", name); Object.entries(attrs).forEach(([key, value]) => el.setAttribute(key, value)); return el; };
+          [0, .25, .5, .75, 1].forEach(step => {
+            const value = Math.round(maxY * step); const yPos = y(value);
+            chart.appendChild(svgEl("line", { x1: left, x2: width - right, y1: yPos, y2: yPos, stroke: "#e4ddd4", "stroke-width": 1 }));
+            const label = svgEl("text", { x: left - 8, y: yPos + 4, "text-anchor": "end", fill: "#817972", "font-size": 10 }); label.textContent = formatNumber(value); chart.appendChild(label);
+          });
+          [0, dates.length - 1].filter((value, index, array) => array.indexOf(value) === index).forEach(index => {
+            const label = svgEl("text", { x: x(index), y: height - 9, "text-anchor": index ? "end" : "start", fill: "#817972", "font-size": 10 });
+            label.textContent = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(new Date(`${dates[index]}T12:00:00`)); chart.appendChild(label);
+          });
+          trends.forEach((series, seriesIndex) => {
+            const color = colors[seriesIndex % colors.length];
+            const item = document.createElement("span"); item.className = "legend-item"; item.innerHTML = `<span class="legend-dot" style="background:${color}"></span>${series.platform}`; legend.appendChild(item);
+            const values = dates.map(date => series.points.find(point => point.date === date)?.engagement || 0);
+            const path = values.map((value, index) => `${index ? "L" : "M"} ${x(index)} ${y(value)}`).join(" ");
+            chart.appendChild(svgEl("path", { d: path, fill: "none", stroke: color, "stroke-width": 3, "stroke-linecap": "round", "stroke-linejoin": "round" }));
+            values.forEach((value, index) => { const dot = svgEl("circle", { cx: x(index), cy: y(value), r: 3.5, fill: color }); const title = svgEl("title"); title.textContent = `${series.platform}: ${formatNumber(value)} engagements on ${dates[index]}`; dot.appendChild(title); chart.appendChild(dot); });
+          });
+        }
+      })();
+    </script>
   </body>
 </html>

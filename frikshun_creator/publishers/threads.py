@@ -23,12 +23,16 @@ class ThreadsAdapter(PublisherAdapter):
         base_url=None,
         media_base_url=None,
         dry_run=None,
+        status_attempts=20,
+        status_delay=2,
     ):
         self.access_token = access_token or os.getenv("THREADS_ACCESS_TOKEN", "")
         self.oauth = oauth
         self.api_version = api_version or os.getenv("THREADS_API_VERSION", "v1.0")
         self.base_url = (base_url or os.getenv("THREADS_API_BASE_URL", "https://graph.threads.net")).rstrip("/")
         self.media_base_url = (media_base_url or os.getenv("THREADS_MEDIA_BASE_URL", "")).rstrip("/")
+        self.status_attempts = status_attempts
+        self.status_delay = status_delay
         if dry_run is None:
             dry_run = os.getenv("THREADS_DRY_RUN", "true").lower() != "false"
         self.dry_run = dry_run
@@ -99,18 +103,35 @@ class ThreadsAdapter(PublisherAdapter):
                 },
             )
 
+        container = {}
+        status = {}
+        stage = "create_container"
         try:
             container = self.create_container(text=text, media_url=media_url, media_type=media_type)
             creation_id = str(container.get("id") or "")
             if not creation_id:
                 return self.failed_result("Threads did not return a creation id.", container)
 
+            if media_type in {"IMAGE", "VIDEO"}:
+                stage = "wait_for_container"
+                status = self.wait_for_container(creation_id)
+                if status.get("status") != "FINISHED":
+                    message = status.get("error_message") or status.get("status") or "Threads media processing failed."
+                    return self.failed_result(
+                        message,
+                        {"container": container, "status": status, "media_type": media_type, "stage": stage},
+                    )
+
+            stage = "publish_container"
             published = self.publish_container(creation_id)
             thread_id = str(published.get("id") or "")
             if not thread_id:
                 return self.failed_result("Threads did not return a published post id.", published)
         except (requests.RequestException, ValueError) as error:
-            return self.failed_result(str(error), {"media_type": media_type})
+            return self.failed_result(
+                str(error),
+                {"container": container, "status": status, "media_type": media_type, "stage": stage},
+            )
 
         details = {}
         fetch_error = ""
@@ -125,6 +146,7 @@ class ThreadsAdapter(PublisherAdapter):
             external_url=str(details.get("permalink") or ""),
             raw_response={
                 "container": container,
+                "status": status,
                 "published": published,
                 "thread": details,
                 "thread_fetch_error": fetch_error,
@@ -145,6 +167,24 @@ class ThreadsAdapter(PublisherAdapter):
 
     def publish_container(self, creation_id):
         return self.graph_post("me/threads_publish", {"creation_id": creation_id})
+
+    def wait_for_container(self, creation_id):
+        last_status = {}
+        last_error = None
+        for attempt in range(self.status_attempts):
+            try:
+                last_status = self.graph_get(creation_id, {"fields": "status,error_message"})
+                last_error = None
+            except (requests.RequestException, ValueError) as error:
+                last_error = error
+            else:
+                if last_status.get("status") in {"FINISHED", "ERROR", "EXPIRED"}:
+                    return last_status
+            if attempt + 1 < self.status_attempts and self.status_delay:
+                time.sleep(self.status_delay)
+        if last_error:
+            raise last_error
+        return last_status
 
     def fetch_thread(self, thread_id):
         return self.graph_get(thread_id, {"fields": "id,permalink,username,media_type,media_product_type,text,timestamp"})
@@ -252,7 +292,25 @@ class ThreadsAdapter(PublisherAdapter):
         except ValueError:
             payload = {"raw_body": response.text}
         if not response.ok:
-            message = payload.get("error", {}).get("message", response.reason)
+            error = payload.get("error") or {}
+            details = str((error.get("error_data") or {}).get("details") or "").strip()
+            message = str(
+                error.get("error_user_msg")
+                or error.get("message")
+                or payload.get("error_description")
+                or payload.get("raw_body")
+                or response.reason
+                or "Threads API request failed."
+            ).strip()
+            if details and details.lower() not in message.lower():
+                message = f"{message}: {details}"
+            code = error.get("code")
+            subcode = error.get("error_subcode")
+            identifiers = ", ".join(
+                part for part in (f"code {code}" if code else "", f"subcode {subcode}" if subcode else "") if part
+            )
+            if identifiers:
+                message = f"{message} ({identifiers})"
             raise ValueError(message)
         return payload
 
@@ -301,13 +359,13 @@ class ThreadsAdapter(PublisherAdapter):
         return None
 
     def current_access_token(self):
-        if self.access_token:
-            return self.access_token
         if self.oauth:
             try:
                 return self.oauth.access_token()
             except ValueError:
-                return ""
+                pass
+        if self.access_token:
+            return self.access_token
         return ""
 
     def fit_text_with_footer(self, paragraphs, footer, hashtags):
