@@ -347,8 +347,12 @@
 
                 {% if is_daily %}
                   <div class="post-actions">
+                    <a class="action" href="{{ url_for('creator.edit_daily_fragment', artifact_id=post.id) }}">Edit</a>
                     {% if post.auto_publish_complete %}
                       <span class="action complete">Published to X + FanVue</span>
+                      <form action="{{ url_for('creator.unpublish_daily_fragment', artifact_id=post.id) }}" method="post" onsubmit="return confirm('Remove the live platform posts? Republished posts will have new URLs and engagement counts.');">
+                        <button class="action" type="submit">Unpublish</button>
+                      </form>
                     {% else %}
                       <form action="{{ url_for('creator.publish_daily_fragment', artifact_id=post.id) }}" method="post">
                         <button class="action strong" type="submit">Publish</button>

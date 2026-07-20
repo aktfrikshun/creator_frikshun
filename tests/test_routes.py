@@ -128,6 +128,92 @@ class RoutesTest(unittest.TestCase):
         self.assertEqual(b"public-image", response.data)
         response.close()
 
+    def test_daily_fragment_can_be_unpublished_edited_and_republished(self):
+        image_path = Path(self.uploads.name) / "daily.png"
+        image_path.write_bytes(b"old-image")
+        with self.app.app_context():
+            session = get_session()
+            artifact = Artifact(
+                title="Recovered Fragment — Editable",
+                fragment_code="daily-fragment-run-editable",
+                media_path=str(image_path),
+                media_content_type="image/png",
+                generated_metadata={"run_id": "editable", "public_image_prompt": "A precise image prompt"},
+            )
+            session.add(artifact)
+            for platform in ("facebook", "instagram", "threads", "x", "fanvue"):
+                draft = PostDraft(artifact=artifact, platform=platform, caption=f"Old {platform}", status="published")
+                session.add(draft)
+                session.add(PostPublication(
+                    post_draft=draft, platform=platform, status="published",
+                    external_post_id=f"dry-run-{platform}-1",
+                ))
+            session.commit()
+            artifact_id = artifact.id
+
+        response = self.client.post(f"/daily-fragments/{artifact_id}/unpublish", follow_redirects=True)
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"ready to edit and republish", response.data)
+
+        response = self.client.post(
+            f"/daily-fragments/{artifact_id}/edit",
+            data={
+                "caption_facebook": "New canonical text",
+                "caption_instagram": "New Instagram text",
+                "caption_threads": "New Threads text",
+                "caption_x": "New X text",
+                "caption_fanvue": "New FanVue text",
+                "review_status": "not_accepted",
+                "feedback_category": "composition",
+                "feedback_reason": "The crop felt too static.",
+                "primary_image": (BytesIO(b"new-image"), "replacement.png"),
+                "additional_images": [(BytesIO(b"extra-image"), "extra.png")],
+            },
+            content_type="multipart/form-data",
+            follow_redirects=True,
+        )
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"Post changes saved", response.data)
+        with self.app.app_context():
+            session = get_session()
+            artifact = session.get(Artifact, artifact_id)
+            metadata = artifact.generated_metadata
+            self.assertEqual("New canonical text", artifact.summary)
+            self.assertEqual("not_accepted", metadata["review_status"])
+            self.assertEqual("The crop felt too static.", metadata["review_feedback"][-1]["reason"])
+            self.assertEqual(1, len(metadata["additional_media"]))
+            self.assertEqual(1, len(metadata["image_history"]))
+            self.assertEqual(
+                {"approved"},
+                {draft.status for draft in artifact.post_drafts},
+            )
+
+    def test_daily_fragment_edit_requires_unpublish_first(self):
+        image_path = Path(self.uploads.name) / "live.png"
+        image_path.write_bytes(b"image")
+        with self.app.app_context():
+            session = get_session()
+            artifact = Artifact(
+                title="Recovered Fragment — Live",
+                fragment_code="daily-fragment-run-live-edit",
+                media_path=str(image_path),
+            )
+            draft = PostDraft(artifact=artifact, platform="x", caption="Still live", status="published")
+            session.add_all([artifact, draft])
+            session.add(PostPublication(post_draft=draft, platform="x", status="published", external_post_id="live-1"))
+            session.commit()
+            artifact_id = artifact.id
+
+        response = self.client.post(
+            f"/daily-fragments/{artifact_id}/edit",
+            data={"caption_x": "Should not save"},
+            follow_redirects=True,
+        )
+        self.assertIn(b"Unpublish the live post before changing", response.data)
+        with self.app.app_context():
+            artifact = get_session().get(Artifact, artifact_id)
+            self.assertEqual("Still live", artifact.post_drafts[0].caption)
+
     def test_create_artifact_generates_drafts_and_facebook_dry_run_publishes(self):
         response = self.client.post(
             "/artifacts",

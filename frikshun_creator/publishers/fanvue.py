@@ -76,6 +76,16 @@ class FanvueAdapter(PublisherAdapter):
                              f"https://www.fanvue.com/chloekat/post/{post_id}",
                              raw_response={"upload": upload, "completed": completed, "media": media, "post": post})
 
+    def unpublish(self, publication):
+        if self.dry_run:
+            return PublishResult(True, "unpublished", publication.external_post_id,
+                                 raw_response={"dry_run": True, "deleted": True})
+        try:
+            payload = self.api("DELETE", f"/posts/{publication.external_post_id}")
+        except (requests.RequestException, ValueError) as error:
+            return self.failed_result(str(error), {})
+        return PublishResult(True, "unpublished", publication.external_post_id, raw_response=payload or {})
+
     def upload_parts(self, path, upload_id, part_size):
         parts = []
         total = int(math.ceil(path.stat().st_size / float(part_size)))

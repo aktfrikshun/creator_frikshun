@@ -1,11 +1,12 @@
 from .text import compact_tags
-from ..models import CanonEntry, PostDraft
+from ..models import Artifact, CanonEntry, PostDraft
 
 
 class GenerationContext:
-    def __init__(self, canon_entries=None, recent_posts=None):
+    def __init__(self, canon_entries=None, recent_posts=None, review_feedback=None):
         self.canon_entries = canon_entries or []
         self.recent_posts = recent_posts or []
+        self.review_feedback = review_feedback or []
 
     @property
     def canon_excerpt(self):
@@ -45,6 +46,16 @@ class GenerationContext:
             if draft.caption:
                 captions.append(f"{draft.platform}: {draft.caption[:360]}")
         return "\n".join(captions)
+
+    @property
+    def review_feedback_excerpt(self):
+        lessons = []
+        for item in self.review_feedback[-12:]:
+            category = str(item.get("category") or "general").replace("_", " ")
+            reason = str(item.get("reason") or "").strip()
+            if reason:
+                lessons.append(f"Avoid a previously rejected {category} issue: {reason[:300]}")
+        return "\n".join(lessons)
 
     @property
     def inherited_tags(self):
@@ -121,4 +132,18 @@ def load_generation_context(session):
         .limit(20)
         .all()
     )
-    return GenerationContext(canon_entries=canon_entries, recent_posts=recent_posts)
+    reviewed_artifacts = (
+        session.query(Artifact)
+        .filter(Artifact.fragment_code.like("daily-fragment-run-%"))
+        .order_by(Artifact.updated_at.desc())
+        .limit(30)
+        .all()
+    )
+    review_feedback = []
+    for artifact in reversed(reviewed_artifacts):
+        review_feedback.extend(list((artifact.generated_metadata or {}).get("review_feedback") or []))
+    return GenerationContext(
+        canon_entries=canon_entries,
+        recent_posts=recent_posts,
+        review_feedback=review_feedback,
+    )

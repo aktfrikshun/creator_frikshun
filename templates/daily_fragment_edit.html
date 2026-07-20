@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Edit {{ artifact.title }} · Creator OS</title>
+    <style>
+      :root { --ink:#302925; --muted:#756b64; --line:#ded5cc; --paper:#f5f0e9; --surface:#fffdf9; --accent:#9e2f3d; --danger:#7f2431; }
+      * { box-sizing:border-box; }
+      body { margin:0; color:var(--ink); background:var(--paper); font:15px/1.5 Inter, ui-sans-serif, system-ui, sans-serif; }
+      .shell { width:min(100% - 32px, 1040px); margin:0 auto; padding:34px 0 70px; }
+      a { color:inherit; }
+      .top { display:flex; justify-content:space-between; gap:20px; align-items:start; margin-bottom:24px; }
+      h1 { margin:5px 0 4px; font:500 clamp(30px,5vw,48px)/1.05 Georgia,serif; }
+      .eyebrow { color:var(--accent); font-size:12px; font-weight:800; letter-spacing:.14em; text-transform:uppercase; }
+      .muted { margin:0; color:var(--muted); }
+      .panel { margin-top:16px; padding:22px; border:1px solid var(--line); border-radius:18px; background:var(--surface); }
+      .warning { padding:14px 16px; border:1px solid #e1b5bc; border-radius:12px; color:var(--danger); background:#fff0f2; }
+      .flash { margin-bottom:16px; padding:13px 16px; border:1px solid #b9d3c5; border-radius:12px; color:#2f6950; background:#eef7f1; }
+      .flash.error { color:var(--danger); border-color:#e1b5bc; background:#fff0f2; }
+      .media-grid { display:grid; grid-template-columns:220px 1fr; gap:22px; }
+      .primary-image { width:220px; aspect-ratio:1; object-fit:cover; border-radius:14px; background:#e8e1d8; }
+      .thumbs { display:flex; flex-wrap:wrap; gap:10px; margin-top:12px; }
+      .thumbs img { width:84px; height:84px; object-fit:cover; border-radius:10px; }
+      label { display:block; margin:15px 0 6px; font-weight:750; }
+      textarea, select, input[type=file] { width:100%; border:1px solid var(--line); border-radius:10px; padding:11px 12px; color:var(--ink); background:#fff; font:inherit; }
+      textarea { min-height:145px; resize:vertical; }
+      .caption-tabs { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:15px; }
+      .caption-tabs .wide { grid-column:1/-1; }
+      .actions { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-top:18px; }
+      button, .button { display:inline-flex; border:0; border-radius:10px; padding:10px 14px; color:#fff; background:var(--accent); font:inherit; font-weight:800; text-decoration:none; cursor:pointer; }
+      button.secondary, .button.secondary { color:var(--ink); background:#eee7df; }
+      button.danger { background:var(--danger); }
+      button:disabled { opacity:.45; cursor:not-allowed; }
+      .micro { color:var(--muted); font-size:12px; }
+      @media(max-width:700px) { .media-grid,.caption-tabs { grid-template-columns:1fr; } .primary-image { width:100%; } }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <div class="top">
+        <div><div class="eyebrow">Daily post editor</div><h1>{{ artifact.title }}</h1><p class="muted">{{ artifact.generated_metadata.get('local_date', '') }}</p></div>
+        <a class="button secondary" href="{{ url_for('creator.index') }}">Back to library</a>
+      </div>
+      {% for category, message in get_flashed_messages(with_categories=true) %}<div class="flash {{ category }}">{{ message }}</div>{% endfor %}
+
+      {% if active_publications %}
+        <div class="warning"><strong>This post is live on {{ active_publications|map(attribute='platform')|join(', ') }}.</strong> Unpublish it before editing. Replacing it creates new platform URLs and resets engagement.</div>
+        <form action="{{ url_for('creator.unpublish_daily_fragment', artifact_id=artifact.id) }}" method="post" onsubmit="return confirm('Remove the live platform posts? Their URLs and engagement cannot be preserved when you republish.');">
+          <div class="actions"><button class="danger" type="submit">Unpublish live post</button></div>
+        </form>
+      {% endif %}
+
+      <form action="{{ url_for('creator.update_daily_fragment', artifact_id=artifact.id) }}" method="post" enctype="multipart/form-data">
+        <section class="panel media-grid">
+          <div>
+            <img class="primary-image" src="{{ url_for('creator.daily_fragment_media', artifact_id=artifact.id, variant='public') }}" alt="Current primary artwork">
+            {% if additional_images %}<div class="thumbs">{% for image in additional_images %}<img src="{{ url_for('creator.daily_fragment_media', artifact_id=artifact.id, variant='additional-' ~ loop.index0) }}" alt="Additional image {{ loop.index }}">{% endfor %}</div>{% endif %}
+          </div>
+          <div>
+            <h2>Images</h2>
+            <p class="muted">Replace the primary image, or attach additional candidates. Previous primary images remain in the post history.</p>
+            <label for="primary_image">Replace primary image</label><input id="primary_image" name="primary_image" type="file" accept="image/*">
+            <label for="additional_images">Add images</label><input id="additional_images" name="additional_images" type="file" accept="image/*" multiple>
+            {% if artifact.generated_metadata.get('public_image_prompt') %}<p class="micro">The original generation prompt is saved and can be reused exactly.</p>{% endif %}
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Post text</h2>
+          <p class="muted">Each platform keeps its own edited version.</p>
+          <div class="caption-tabs">
+            {% for platform in platforms %}
+              <div class="{% if platform == 'facebook' %}wide{% endif %}"><label for="caption_{{ platform }}">{{ 'FanVue' if platform == 'fanvue' else platform|title }}</label><textarea id="caption_{{ platform }}" name="caption_{{ platform }}" {% if active_publications %}disabled{% endif %}>{{ drafts[platform].caption if drafts.get(platform) else '' }}</textarea></div>
+            {% endfor %}
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Generation feedback</h2>
+          <p class="muted">This is retained as structured history so future generation can learn from patterns instead of a vague thumbs-down.</p>
+          <label for="review_status">Review</label>
+          <select id="review_status" name="review_status" {% if active_publications %}disabled{% endif %}><option value="accepted" {% if artifact.generated_metadata.get('review_status') != 'not_accepted' %}selected{% endif %}>Accepted</option><option value="not_accepted" {% if artifact.generated_metadata.get('review_status') == 'not_accepted' %}selected{% endif %}>Not accepted</option></select>
+          <label for="feedback_category">What missed?</label>
+          <select id="feedback_category" name="feedback_category" {% if active_publications %}disabled{% endif %}><option value="">Choose a category</option>{% for value,label in [('likeness','Chloe likeness'),('composition','Composition'),('visual_style','Visual style'),('text_tone','Text tone'),('canon','Canon conflict'),('repetition','Too repetitive'),('other','Other')] %}<option value="{{ value }}">{{ label }}</option>{% endfor %}</select>
+          <label for="feedback_reason">Why?</label><textarea id="feedback_reason" name="feedback_reason" placeholder="A concrete sentence is more useful than a score alone." {% if active_publications %}disabled{% endif %}></textarea>
+          <div class="actions"><button type="submit" {% if active_publications %}disabled{% endif %}>Save changes</button></div>
+        </section>
+      </form>
+
+      <section class="panel">
+        <h2>Regenerate</h2>
+        <p class="muted">Generate a new primary image from the exact original prompt. The current image moves into history.</p>
+        <div class="actions">
+          <form action="{{ url_for('creator.regenerate_daily_fragment_image', artifact_id=artifact.id) }}" method="post"><button type="submit" {% if active_publications or not artifact.generated_metadata.get('public_image_prompt') %}disabled{% endif %}>Regenerate image</button></form>
+          {% if not active_publications %}<form action="{{ url_for('creator.publish_daily_fragment', artifact_id=artifact.id) }}" method="post"><button class="secondary" type="submit">Republish replacement</button></form>{% endif %}
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

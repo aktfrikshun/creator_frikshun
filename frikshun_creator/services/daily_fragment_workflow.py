@@ -25,6 +25,8 @@ class DailyFragmentPackage:
     threads_body: str = ""
     content_tags: list[str] = field(default_factory=lambda: ["recovered-fragment", "identity", "echo-traversal"])
     generation_warnings: list[str] = field(default_factory=list)
+    public_image_prompt: str = ""
+    fanvue_image_prompt: str = ""
 
 
 def default_daily_fragment_run_id(now=None):
@@ -54,6 +56,8 @@ def package_from_existing_artifact(artifact):
         threads_body=str(drafts.get("threads").caption if drafts.get("threads") else "").strip(),
         content_tags=list(artifact.content_tags or []),
         generation_warnings=list(metadata.get("generation_warnings") or []),
+        public_image_prompt=str(metadata.get("public_image_prompt") or ""),
+        fanvue_image_prompt=str(metadata.get("fanvue_image_prompt") or ""),
     )
 
 
@@ -77,6 +81,8 @@ def store_daily_fragment_package(session, package, local_date, run_id=None):
             "local_date": local_date.isoformat(),
             "fanvue_media_path": str(fanvue_image_path.resolve()),
             "generation_warnings": list(package.generation_warnings or []),
+            "public_image_prompt": package.public_image_prompt,
+            "fanvue_image_prompt": package.fanvue_image_prompt,
         }
     )
     if artifact is None:

@@ -241,6 +241,8 @@ class DailyFragmentGenerator:
             fanvue_image_path=public_path,
             content_tags=self.content_tags_for_lane(selected_lane),
             generation_warnings=warnings,
+            public_image_prompt=plan.public_image_prompt,
+            fanvue_image_prompt=plan.fanvue_image_prompt,
         )
 
     def generate_image_safely(self, prompt, destination_path, variant):
@@ -490,7 +492,8 @@ class DailyFragmentGenerator:
             f"- Avoid these recently used content lanes when possible: {recent_lanes or 'none recorded'}.\n"
             f"Canon guidance:\n{generation_context.canon_excerpt or 'No canon excerpt available.'}\n"
             f"Visual canon guidance:\n{generation_context.visual_excerpt or 'No visual canon excerpt available.'}\n"
-            f"Recent post excerpt:\n{generation_context.recent_post_excerpt or 'No recent post excerpt available.'}"
+            f"Recent post excerpt:\n{generation_context.recent_post_excerpt or 'No recent post excerpt available.'}\n"
+            f"Creator review lessons:\n{generation_context.review_feedback_excerpt or 'No rejected-generation feedback available.'}"
         )
         if selected_lane == "fantasy_art":
             prompt += (

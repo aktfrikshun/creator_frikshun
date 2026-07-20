@@ -29,6 +29,7 @@ from .services.canon_importer import CanonImporter
 from .services.analytics_accounts import synchronize_account_registry
 from .services.account_analytics_runner import AccountAnalyticsRunner
 from .services.draft_generator import ArtifactDraftGenerator, PLATFORMS
+from .services.daily_fragment_generator import DailyFragmentGenerator
 from .services.generation_context import load_generation_context
 from .services.google_oauth import GoogleOAuth
 from .services.fanvue_oauth import FanvueOAuth
@@ -604,6 +605,178 @@ def publish_daily_fragment(artifact_id):
     return redirect(url_for("creator.index"))
 
 
+def publishing_adapters():
+    return {
+        "facebook": facebook_adapter,
+        "instagram": instagram_adapter,
+        "threads": threads_adapter,
+        "x": x_adapter,
+        "fanvue": fanvue_adapter,
+    }
+
+
+@bp.post("/daily-fragments/<int:artifact_id>/unpublish")
+def unpublish_daily_fragment(artifact_id):
+    session = get_session()
+    artifact = daily_fragment_or_404(session, artifact_id)
+    active = [
+        publication
+        for draft in artifact.post_drafts
+        for publication in draft.publications
+        if publication.status == "published" and publication.external_post_id
+    ]
+    failures = []
+    for publication in active:
+        factory = publishing_adapters().get(publication.platform)
+        if factory is None:
+            failures.append(f"{publication.platform}: deletion is not configured")
+            continue
+        result = factory().unpublish(publication)
+        if result.success:
+            publication.status = "unpublished"
+            publication.raw_response = {
+                **dict(publication.raw_response or {}),
+                "unpublish": result.raw_response,
+                "unpublished_at": datetime.now(timezone.utc).isoformat(),
+            }
+            publication.post_draft.status = "approved"
+            publication.post_draft.updated_at = datetime.now(timezone.utc)
+        else:
+            failures.append(f"{publication.platform}: {result.error_message or 'delete failed'}")
+    session.commit()
+    if failures:
+        flash("Some live posts could not be removed: " + "; ".join(failures), "error")
+    elif active:
+        flash("The live platform posts were removed. This Creator OS post is ready to edit and republish.", "success")
+    else:
+        flash("This post was already unpublished and is ready to edit.", "success")
+    return redirect(url_for("creator.edit_daily_fragment", artifact_id=artifact.id))
+
+
+@bp.get("/daily-fragments/<int:artifact_id>/edit")
+def edit_daily_fragment(artifact_id):
+    artifact = daily_fragment_or_404(get_session(), artifact_id)
+    drafts = {draft.platform: draft for draft in artifact.post_drafts if not draft.archived}
+    active_publications = [
+        publication for draft in drafts.values() for publication in draft.publications
+        if publication.status == "published" and publication.external_post_id
+    ]
+    return render_template(
+        "daily_fragment_edit.html",
+        artifact=artifact,
+        drafts=drafts,
+        platforms=("facebook", "instagram", "threads", "x", "fanvue"),
+        active_publications=active_publications,
+        additional_images=list((artifact.generated_metadata or {}).get("additional_media") or []),
+    )
+
+
+@bp.post("/daily-fragments/<int:artifact_id>/edit")
+def update_daily_fragment(artifact_id):
+    session = get_session()
+    artifact = daily_fragment_or_404(session, artifact_id)
+    if any(
+        publication.status == "published" and publication.external_post_id
+        for draft in artifact.post_drafts for publication in draft.publications
+    ):
+        flash("Unpublish the live post before changing its text or media.", "error")
+        return redirect(url_for("creator.edit_daily_fragment", artifact_id=artifact.id))
+
+    metadata = dict(artifact.generated_metadata or {})
+    history = list(metadata.get("image_history") or [])
+    replacement = request.files.get("primary_image")
+    if replacement and replacement.filename:
+        if artifact.media_path:
+            history.append({"path": artifact.media_path, "replaced_at": datetime.now(timezone.utc).isoformat()})
+        uploaded = save_artifact_file(replacement, current_app.config.get("UPLOAD_FOLDER"))
+        artifact.original_filename = uploaded["original_filename"]
+        artifact.media_path = uploaded["media_path"]
+        artifact.media_content_type = uploaded["media_content_type"]
+        artifact.media_size = uploaded["media_size"]
+        metadata.pop("public_media_url", None)
+        metadata.pop("s3_object_key", None)
+
+    additional = list(metadata.get("additional_media") or [])
+    for upload in request.files.getlist("additional_images"):
+        if not upload or not upload.filename:
+            continue
+        saved = save_artifact_file(upload, current_app.config.get("UPLOAD_FOLDER"))
+        additional.append(saved)
+    metadata["additional_media"] = additional
+    metadata["image_history"] = history
+
+    drafts = {draft.platform: draft for draft in artifact.post_drafts if not draft.archived}
+    for platform in ("facebook", "instagram", "threads", "x", "fanvue"):
+        caption = request.form.get(f"caption_{platform}")
+        if caption is not None and platform in drafts:
+            drafts[platform].caption = caption.strip()
+            drafts[platform].status = "approved"
+            drafts[platform].approved_at = datetime.now(timezone.utc)
+            drafts[platform].updated_at = datetime.now(timezone.utc)
+    canonical = drafts.get("facebook")
+    if canonical:
+        artifact.summary = canonical.caption
+        artifact.lore_text = canonical.caption
+
+    review_status = request.form.get("review_status", "accepted").strip()
+    reason = request.form.get("feedback_reason", "").strip()
+    category = request.form.get("feedback_category", "").strip()
+    metadata["review_status"] = review_status
+    if review_status == "not_accepted" or reason:
+        feedback = list(metadata.get("review_feedback") or [])
+        feedback.append({
+            "status": review_status,
+            "category": category,
+            "reason": reason,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+        metadata["review_feedback"] = feedback
+    artifact.generated_metadata = metadata
+    artifact.updated_at = datetime.now(timezone.utc)
+    session.commit()
+    flash("Post changes saved. Republish will create fresh platform posts for this same Creator OS entry.", "success")
+    return redirect(url_for("creator.edit_daily_fragment", artifact_id=artifact.id))
+
+
+@bp.post("/daily-fragments/<int:artifact_id>/regenerate-image")
+def regenerate_daily_fragment_image(artifact_id):
+    session = get_session()
+    artifact = daily_fragment_or_404(session, artifact_id)
+    if any(
+        publication.status == "published" and publication.external_post_id
+        for draft in artifact.post_drafts for publication in draft.publications
+    ):
+        flash("Unpublish the live post before regenerating its image.", "error")
+        return redirect(url_for("creator.edit_daily_fragment", artifact_id=artifact.id))
+    metadata = dict(artifact.generated_metadata or {})
+    prompt = str(metadata.get("public_image_prompt") or "").strip()
+    if not prompt:
+        flash("This older post does not have its original image prompt saved, so it cannot be regenerated exactly.", "error")
+        return redirect(url_for("creator.edit_daily_fragment", artifact_id=artifact.id))
+    suffix = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
+    destination = Path(current_app.config.get("UPLOAD_FOLDER")) / f"{suffix}-regenerated.png"
+    try:
+        DailyFragmentGenerator(current_app.config.get("UPLOAD_FOLDER")).generate_image(prompt, destination)
+    except (OSError, requests.RequestException, ValueError) as error:
+        flash(f"Image regeneration failed: {error}", "error")
+        return redirect(url_for("creator.edit_daily_fragment", artifact_id=artifact.id))
+    history = list(metadata.get("image_history") or [])
+    if artifact.media_path:
+        history.append({"path": artifact.media_path, "replaced_at": datetime.now(timezone.utc).isoformat()})
+    metadata["image_history"] = history
+    metadata.pop("public_media_url", None)
+    metadata.pop("s3_object_key", None)
+    artifact.media_path = str(destination.resolve())
+    artifact.original_filename = destination.name
+    artifact.media_content_type = "image/png"
+    artifact.media_size = destination.stat().st_size
+    artifact.generated_metadata = metadata
+    artifact.updated_at = datetime.now(timezone.utc)
+    session.commit()
+    flash("A new image candidate was generated from the original prompt. The prior image remains in history.", "success")
+    return redirect(url_for("creator.edit_daily_fragment", artifact_id=artifact.id))
+
+
 @bp.post("/drafts/<int:draft_id>/publish-from-library")
 def publish_draft_from_library(draft_id):
     session = get_session()
@@ -677,7 +850,13 @@ def daily_fragment_or_404(session, artifact_id):
 
 def daily_fragment_media_path(artifact, variant):
     metadata = dict((artifact.generated_metadata or {}) or {})
-    value = metadata.get("fanvue_media_path") if variant == "fanvue" else artifact.media_path
+    if variant.startswith("additional-"):
+        try:
+            value = (metadata.get("additional_media") or [])[int(variant.removeprefix("additional-"))]["media_path"]
+        except (ValueError, IndexError, KeyError, TypeError):
+            abort(404)
+    else:
+        value = metadata.get("fanvue_media_path") if variant == "fanvue" else artifact.media_path
     path = Path(str(value or "")).expanduser()
     if not path.is_file():
         abort(404)
@@ -686,7 +865,7 @@ def daily_fragment_media_path(artifact, variant):
 
 @bp.get("/daily-fragments/<int:artifact_id>/media/<variant>")
 def daily_fragment_media(artifact_id, variant):
-    if variant not in {"public", "fanvue"}:
+    if variant not in {"public", "fanvue"} and not variant.startswith("additional-"):
         abort(404)
     artifact = daily_fragment_or_404(get_session(), artifact_id)
     path = daily_fragment_media_path(artifact, variant)

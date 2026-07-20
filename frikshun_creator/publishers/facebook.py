@@ -84,6 +84,24 @@ class FacebookAdapter(PublisherAdapter):
             return self.publish_video(post_draft, message)
         return self.publish_feed_post(message)
 
+    def unpublish(self, publication):
+        if self.dry_run:
+            return PublishResult(True, "unpublished", publication.external_post_id,
+                                 raw_response={"dry_run": True, "deleted": True})
+        response = requests.delete(
+            f"https://graph.facebook.com/{self.graph_version}/{publication.external_post_id}",
+            data={"access_token": self.access_token}, timeout=20,
+        )
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {"raw_body": response.text}
+        if not response.ok or payload.get("success") is False:
+            return PublishResult(False, "failed", publication.external_post_id,
+                                 error_message=payload.get("error", {}).get("message", response.reason),
+                                 raw_response=payload)
+        return PublishResult(True, "unpublished", publication.external_post_id, raw_response=payload)
+
     def publish_feed_post(self, message):
         endpoint = f"https://graph.facebook.com/{self.graph_version}/{self.page_id}/feed"
         response = requests.post(

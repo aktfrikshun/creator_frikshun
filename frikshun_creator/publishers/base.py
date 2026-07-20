@@ -97,6 +97,10 @@ class PublisherAdapter:
     def publish(self, post_draft):
         raise NotImplementedError
 
+    def unpublish(self, post_publication):
+        """Remove a previously published post from its platform."""
+        raise NotImplementedError
+
     def fetch_post_metrics(self, post_publication):
         raise NotImplementedError
 

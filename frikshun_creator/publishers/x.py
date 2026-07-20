@@ -143,6 +143,20 @@ class XAdapter(PublisherAdapter):
             raw_response={"media": media, "published": published},
         )
 
+    def unpublish(self, publication):
+        if self.dry_run:
+            return PublishResult(True, "unpublished", publication.external_post_id,
+                                 raw_response={"dry_run": True, "deleted": True})
+        try:
+            payload = self.request("DELETE", f"/2/tweets/{publication.external_post_id}")
+        except (requests.RequestException, ValueError) as error:
+            return self.failed_result(str(error), {})
+        deleted = bool((payload.get("data") or {}).get("deleted"))
+        return PublishResult(deleted, "unpublished" if deleted else "failed",
+                             publication.external_post_id,
+                             error_message="X did not confirm that the post was deleted." if not deleted else "",
+                             raw_response=payload)
+
     def fetch_post_metrics(self, post_publication):
         if self.dry_run:
             return PostMetrics(
