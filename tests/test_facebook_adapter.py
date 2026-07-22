@@ -24,6 +24,36 @@ class FacebookAdapterTest(unittest.TestCase):
         self.assertEqual("published", result.status)
         self.assertTrue(result.external_post_id.startswith("dry-run-facebook-"))
         self.assertIn("message", result.raw_response)
+        self.assertTrue(result.raw_response["message"].endswith("@allenktaylor @chloekatastropheai"))
+
+    def test_prepare_does_not_duplicate_existing_account_tags(self):
+        artifact = Artifact(title="Signal Test")
+        draft = PostDraft(
+            artifact=artifact,
+            platform="facebook",
+            caption="Recovered with @AllenKTaylor already in the signal.",
+            hashtags=[],
+        )
+
+        message = FacebookAdapter(dry_run=True).prepare(draft)
+
+        self.assertEqual(1, message.lower().count("@allenktaylor"))
+        self.assertEqual(1, message.lower().count("@chloekatastropheai"))
+        self.assertTrue(message.endswith("@chloekatastropheai"))
+
+    def test_account_tags_can_be_overridden(self):
+        artifact = Artifact(title="Signal Test")
+        draft = PostDraft(
+            artifact=artifact,
+            platform="facebook",
+            caption="A custom signal.",
+            hashtags=[],
+        )
+
+        message = FacebookAdapter(dry_run=True, tag_usernames=["@customaccount"]).prepare(draft)
+
+        self.assertTrue(message.endswith("@customaccount"))
+        self.assertNotIn("@allenktaylor", message)
 
     def test_profile_target_requires_manual_publishing(self):
         artifact = Artifact(title="Signal Test")

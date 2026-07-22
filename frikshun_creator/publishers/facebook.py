@@ -1,4 +1,5 @@
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -10,6 +11,7 @@ from .base import PostInteractionData, PostMetrics, PublishResult, PublisherAdap
 
 class FacebookAdapter(PublisherAdapter):
     platform = "facebook"
+    DEFAULT_TAG_USERNAMES = ("allenktaylor", "chloekatastropheai")
 
     def __init__(
         self,
@@ -18,14 +20,33 @@ class FacebookAdapter(PublisherAdapter):
         graph_version=None,
         dry_run=None,
         target_type=None,
+        tag_usernames=None,
     ):
         self.page_id = page_id or os.getenv("FACEBOOK_PAGE_ID", "")
         self.access_token = access_token or os.getenv("FACEBOOK_PAGE_ACCESS_TOKEN", "")
         self.graph_version = graph_version or os.getenv("FACEBOOK_GRAPH_VERSION", "v20.0")
         self.target_type = target_type or os.getenv("FACEBOOK_TARGET_TYPE", "page")
+        if tag_usernames is None:
+            tag_usernames = self.DEFAULT_TAG_USERNAMES
+        self.tag_usernames = tuple(
+            username.strip().lstrip("@")
+            for username in tag_usernames
+            if username and username.strip().lstrip("@")
+        )
         if dry_run is None:
             dry_run = os.getenv("FACEBOOK_DRY_RUN", "true").lower() != "false"
         self.dry_run = dry_run
+
+    def prepare(self, post_draft):
+        message = super().prepare(post_draft)
+        missing_tags = [
+            f"@{username}"
+            for username in self.tag_usernames
+            if not re.search(rf"(?<![\w@])@{re.escape(username)}\b", message, re.IGNORECASE)
+        ]
+        if missing_tags:
+            message = f"{message}\n\n{' '.join(missing_tags)}"
+        return message
 
     def validate(self, post_draft):
         base_result = super().validate(post_draft)
