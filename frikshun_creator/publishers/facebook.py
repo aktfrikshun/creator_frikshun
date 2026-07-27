@@ -1,5 +1,5 @@
 import os
-import re
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -7,11 +7,11 @@ from uuid import uuid4
 import requests
 
 from .base import PostInteractionData, PostMetrics, PublishResult, PublisherAdapter
+from ..services.post_media import media_kind, post_media_items
 
 
 class FacebookAdapter(PublisherAdapter):
     platform = "facebook"
-    DEFAULT_TAG_USERNAMES = ("allenktaylor", "chloekatastropheai")
 
     def __init__(
         self,
@@ -20,33 +20,14 @@ class FacebookAdapter(PublisherAdapter):
         graph_version=None,
         dry_run=None,
         target_type=None,
-        tag_usernames=None,
     ):
         self.page_id = page_id or os.getenv("FACEBOOK_PAGE_ID", "")
         self.access_token = access_token or os.getenv("FACEBOOK_PAGE_ACCESS_TOKEN", "")
         self.graph_version = graph_version or os.getenv("FACEBOOK_GRAPH_VERSION", "v20.0")
         self.target_type = target_type or os.getenv("FACEBOOK_TARGET_TYPE", "page")
-        if tag_usernames is None:
-            tag_usernames = self.DEFAULT_TAG_USERNAMES
-        self.tag_usernames = tuple(
-            username.strip().lstrip("@")
-            for username in tag_usernames
-            if username and username.strip().lstrip("@")
-        )
         if dry_run is None:
             dry_run = os.getenv("FACEBOOK_DRY_RUN", "true").lower() != "false"
         self.dry_run = dry_run
-
-    def prepare(self, post_draft):
-        message = super().prepare(post_draft)
-        missing_tags = [
-            f"@{username}"
-            for username in self.tag_usernames
-            if not re.search(rf"(?<![\w@])@{re.escape(username)}\b", message, re.IGNORECASE)
-        ]
-        if missing_tags:
-            message = f"{message}\n\n{' '.join(missing_tags)}"
-        return message
 
     def validate(self, post_draft):
         base_result = super().validate(post_draft)
@@ -83,6 +64,7 @@ class FacebookAdapter(PublisherAdapter):
         message = self.prepare(post_draft)
 
         if self.dry_run:
+            media_items = post_media_items(post_draft)
             external_post_id = f"dry-run-facebook-{uuid4()}"
             return PublishResult(
                 success=True,
@@ -95,10 +77,13 @@ class FacebookAdapter(PublisherAdapter):
                     "page_id": self.page_id,
                     "message": message,
                     "media_path": self.media_path(post_draft),
+                    "media_paths": [item.get("media_path") for item in media_items],
                     "publish_kind": self.publish_kind(post_draft),
                 },
             )
 
+        if len(self.supported_images(post_draft)) > 1:
+            return self.publish_photos(post_draft, message)
         if self.should_publish_photo(post_draft):
             return self.publish_photo(post_draft, message)
         if self.should_publish_video(post_draft):
@@ -274,6 +259,63 @@ class FacebookAdapter(PublisherAdapter):
             },
         )
 
+    def publish_photos(self, post_draft, message):
+        photo_endpoint = f"https://graph.facebook.com/{self.graph_version}/{self.page_id}/photos"
+        uploads = []
+        for path, content_type in self.supported_images(post_draft):
+            with path.open("rb") as image_file:
+                response = requests.post(
+                    photo_endpoint,
+                    data={"published": "false", "access_token": self.access_token},
+                    files={"source": (path.name, image_file, content_type)},
+                    timeout=30,
+                )
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = {"raw_body": response.text}
+            if not response.ok or not payload.get("id"):
+                return PublishResult(
+                    False,
+                    "failed",
+                    error_message=payload.get("error", {}).get("message", response.reason),
+                    raw_response={"photo_uploads": uploads, "failed_upload": payload},
+                )
+            uploads.append(payload)
+
+        data = {"message": message, "access_token": self.access_token}
+        for index, payload in enumerate(uploads):
+            data[f"attached_media[{index}]"] = f'{{"media_fbid":"{payload["id"]}"}}'
+        response = requests.post(
+            f"https://graph.facebook.com/{self.graph_version}/{self.page_id}/feed",
+            data=data,
+            timeout=30,
+        )
+        try:
+            feed = response.json()
+        except ValueError:
+            feed = {"raw_body": response.text}
+        if not response.ok:
+            return PublishResult(
+                False,
+                "failed",
+                error_message=feed.get("error", {}).get("message", response.reason),
+                raw_response={"photo_uploads": uploads, "feed_publish": feed},
+            )
+        post_id = str(feed.get("id") or "")
+        return PublishResult(
+            True,
+            "published",
+            post_id,
+            f"https://www.facebook.com/{post_id}" if post_id else "",
+            raw_response={
+                "photo_uploads": uploads,
+                "feed_publish": feed,
+                "publish_kind": "multi_photo",
+                "video_policy": "video attachments skipped for multi-photo Page posts",
+            },
+        )
+
     def publish_video(self, post_draft, message):
         media_path = Path(self.media_path(post_draft))
         endpoint = f"https://graph.facebook.com/{self.graph_version}/{self.page_id}/videos"
@@ -318,6 +360,16 @@ class FacebookAdapter(PublisherAdapter):
             and Path(media_path).exists()
         )
 
+    def supported_images(self, post_draft):
+        images = []
+        for item in post_media_items(post_draft):
+            if media_kind(item) != "image":
+                continue
+            path = Path(str(item.get("media_path") or "")).expanduser()
+            if path.is_file():
+                images.append((path, item.get("media_content_type") or "image/jpeg"))
+        return images
+
     def should_publish_video(self, post_draft):
         media_path = self.media_path(post_draft)
         return (
@@ -327,6 +379,8 @@ class FacebookAdapter(PublisherAdapter):
         )
 
     def publish_kind(self, post_draft):
+        if len(self.supported_images(post_draft)) > 1:
+            return "multi_photo"
         if self.should_publish_photo(post_draft):
             return "photo"
         if self.should_publish_video(post_draft):
@@ -396,6 +450,133 @@ class FacebookAdapter(PublisherAdapter):
             for comment in comments
             if comment.get("id")
         ]
+
+    def fetch_page_interactions(self, post_page_limit=100, comment_page_limit=100):
+        """Fetch comments across every published Page post, regardless of publishing origin."""
+        if self.dry_run:
+            return []
+        if self.target_type != "page":
+            raise ValueError("Facebook Page-wide comment polling only supports Pages.")
+        if not self.page_id or not self.access_token:
+            raise ValueError("FACEBOOK_PAGE_ID and FACEBOOK_PAGE_ACCESS_TOKEN are required for polling.")
+        endpoint = f"https://graph.facebook.com/{self.graph_version}/{self.page_id}/published_posts"
+        fields = (
+            "id,message,created_time,permalink_url,"
+            f"comments.limit({int(comment_page_limit)}).summary(true)"
+            "{id,from,message,created_time,permalink_url}"
+        )
+        interactions = []
+        known_comment_ids = set()
+        page_url = endpoint
+        page_params = {"fields": fields, "limit": int(post_page_limit), "access_token": self.access_token}
+        seen_page_urls = set()
+        while page_url and page_url not in seen_page_urls:
+            seen_page_urls.add(page_url)
+            payload = self.get_graph_page(page_url, page_params)
+            page_params = None
+            for post in payload.get("data") or []:
+                comments_payload = post.get("comments") or {}
+                self.append_page_comment_interactions(
+                    interactions, post, comments_payload.get("data") or [], known_comment_ids
+                )
+                comment_url = (comments_payload.get("paging") or {}).get("next")
+                seen_comment_urls = set()
+                while comment_url and comment_url not in seen_comment_urls:
+                    seen_comment_urls.add(comment_url)
+                    more_comments = self.get_graph_page(comment_url)
+                    self.append_page_comment_interactions(
+                        interactions, post, more_comments.get("data") or [], known_comment_ids
+                    )
+                    comment_url = (more_comments.get("paging") or {}).get("next")
+            page_url = (payload.get("paging") or {}).get("next")
+        return interactions
+
+    def get_graph_page(self, url, params=None):
+        response = requests.get(url, params=params, timeout=30)
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {"raw_body": response.text}
+        if not response.ok:
+            message = payload.get("error", {}).get("message", response.reason)
+            raise ValueError(message)
+        return payload
+
+    def append_page_comment_interactions(self, interactions, post, comments, known_ids=None):
+        known_ids = known_ids if known_ids is not None else {
+            interaction.external_id for interaction in interactions
+        }
+        for comment in comments:
+            comment_id = str(comment.get("id") or "")
+            if not comment_id or comment_id in known_ids:
+                continue
+            known_ids.add(comment_id)
+            raw_payload = dict(comment)
+            raw_payload["source_post_message"] = str(post.get("message") or "")
+            raw_payload["source_post_permalink"] = str(post.get("permalink_url") or "")
+            raw_payload["source_post_created_time"] = str(post.get("created_time") or "")
+            interactions.append(PostInteractionData(
+                platform=self.platform,
+                interaction_type="comment",
+                external_id=comment_id,
+                external_post_id=str(post.get("id") or ""),
+                author_name=str((comment.get("from") or {}).get("name") or ""),
+                author_platform_id=str((comment.get("from") or {}).get("id") or ""),
+                body=str(comment.get("message") or ""),
+                received_at=self.parse_facebook_time(comment.get("created_time")),
+                raw_payload=raw_payload,
+            ))
+
+    def reply_to_comment(self, comment_id, message):
+        comment_id = str(comment_id or "").strip()
+        message = str(message or "").strip()
+        if not comment_id or not message:
+            raise ValueError("Facebook comment id and reply message are required.")
+        if self.target_type != "page":
+            raise ValueError("Facebook comment replies only support Pages.")
+        if self.dry_run:
+            return {"id": f"dry-run-reply-{comment_id}"}
+        if not self.page_id or not self.access_token:
+            raise ValueError("FACEBOOK_PAGE_ID and FACEBOOK_PAGE_ACCESS_TOKEN are required for replies.")
+
+        response = requests.post(
+            f"https://graph.facebook.com/{self.graph_version}/{comment_id}/comments",
+            data={"message": message, "access_token": self.access_token},
+            timeout=20,
+        )
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {"raw_body": response.text}
+        if not response.ok:
+            message = payload.get("error", {}).get("message", response.reason)
+            raise ValueError(message)
+        return payload
+
+    def block_sender(self, author_platform_id):
+        author_platform_id = str(author_platform_id or "").strip()
+        if not author_platform_id:
+            raise ValueError("Facebook sender id is required for blocking.")
+        if self.target_type != "page":
+            raise ValueError("Facebook sender blocking only supports Pages.")
+        if self.dry_run:
+            return {"success": True, "blocked_id": author_platform_id, "dry_run": True}
+        if not self.page_id or not self.access_token:
+            raise ValueError("FACEBOOK_PAGE_ID and FACEBOOK_PAGE_ACCESS_TOKEN are required for blocking.")
+
+        response = requests.post(
+            f"https://graph.facebook.com/{self.graph_version}/{self.page_id}/blocked",
+            data={"asid": json.dumps([author_platform_id]), "access_token": self.access_token},
+            timeout=20,
+        )
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {"raw_body": response.text}
+        if not response.ok:
+            message = payload.get("error", {}).get("message", response.reason)
+            raise ValueError(message)
+        return payload
 
     def validate_publication(self, post_publication):
         if self.target_type != "page":

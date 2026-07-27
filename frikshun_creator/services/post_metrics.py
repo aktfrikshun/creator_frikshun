@@ -80,6 +80,34 @@ class PostMetricsPoller:
                     if self.is_platform_auth_failure(exc):
                         blocked_platforms.add(publication.platform)
 
+        account_fetchers = {
+            "facebook": "fetch_page_interactions",
+            "instagram": "fetch_account_interactions",
+            "threads": "fetch_account_interactions",
+        }
+        for account_platform, method_name in account_fetchers.items():
+            adapter = self.adapters.get(account_platform)
+            if platform not in (None, account_platform) or not adapter or account_platform in blocked_platforms:
+                continue
+            if not hasattr(adapter, method_name):
+                continue
+            try:
+                publications_by_external_id = {
+                    publication.external_post_id: publication
+                    for publication in self.session.query(PostPublication)
+                    .filter(PostPublication.platform == account_platform)
+                    .all()
+                }
+                for interaction_data in getattr(adapter, method_name)():
+                    publication = publications_by_external_id.get(interaction_data.external_post_id)
+                    created = self.upsert_interaction(publication, interaction_data)
+                    if created:
+                        result.interactions_created += 1
+                    else:
+                        result.interactions_updated += 1
+            except Exception as exc:
+                result.errors.append(f"{account_platform} account-wide interactions: {exc}")
+
         poll_run.status = "partial" if result.errors else "succeeded"
         poll_run.scanned = result.scanned
         poll_run.snapshots_created = result.snapshots_created
@@ -159,13 +187,20 @@ class PostMetricsPoller:
             )
             self.session.add(interaction)
 
-        interaction.post_publication_id = publication.id
+        interaction.post_publication_id = publication.id if publication else None
         interaction.interaction_type = interaction_data.interaction_type
         interaction.external_post_id = interaction_data.external_post_id
         interaction.author_name = interaction_data.author_name
         interaction.author_platform_id = interaction_data.author_platform_id
         interaction.body = interaction_data.body
         interaction.raw_payload = interaction_data.raw_payload
+        metadata = dict(interaction_data.raw_payload or {})
+        if (
+            interaction.reply_status != "sent"
+            and (metadata.get("is_owned_by_me") or metadata.get("already_replied_by_us"))
+        ):
+            interaction.reply_status = "ignored"
+            interaction.status = "replied" if metadata.get("already_replied_by_us") else "own_interaction"
         interaction.received_at = interaction_data.received_at
         interaction.fetched_at = datetime.now(timezone.utc)
         return created

@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Manage Engagement | FrikShun Creator</title>
+    <style>
+      :root { --paper:#f4efe8; --card:#fffdf9; --ink:#292321; --muted:#736a64; --line:#ded5cc; --wine:#8d3040; --green:#5c7048; --danger:#a02b2b; }
+      * { box-sizing:border-box; }
+      body { margin:0; background:var(--paper); color:var(--ink); font:15px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,sans-serif; }
+      a { color:inherit; }
+      .shell { width:min(1180px,calc(100% - 32px)); margin:0 auto; padding:24px 0 60px; }
+      .topbar,.hero-row,.card-head,.actions,.policy { display:flex; align-items:center; gap:12px; }
+      .topbar { justify-content:space-between; margin-bottom:20px; color:var(--muted); }
+      .topbar a { text-decoration:none; }
+      .hero { padding:30px; border-radius:22px; color:#fff; background:linear-gradient(130deg,#272120,#573039 62%,#7c3b48); box-shadow:0 18px 50px #44242c20; }
+      .hero-row { justify-content:space-between; align-items:flex-end; flex-wrap:wrap; }
+      .eyebrow { margin:0 0 6px; color:#e8cfd4; font-size:11px; font-weight:800; letter-spacing:.14em; text-transform:uppercase; }
+      h1 { max-width:100%; margin:0; overflow-wrap:anywhere; font:600 clamp(32px,4.2vw,48px)/1.05 Georgia,serif; }
+      .hero p:last-child { max-width:700px; margin:12px 0 0; color:#eadfe1; }
+      .poll-time { margin:16px 0 0; color:#d8c8cb; font-size:12px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; }
+      .summary { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin:18px 0; }
+      .summary.overall { grid-template-columns:repeat(3,1fr); margin-bottom:12px; }
+      .stat { padding:17px; border:1px solid var(--line); border-radius:15px; background:var(--card); }
+      .stat strong { display:block; font:600 28px Georgia,serif; }
+      .stat span { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.08em; }
+      .filters { display:flex; gap:8px; margin:18px 0; flex-wrap:wrap; }
+      .filters a { padding:9px 13px; border:1px solid var(--line); border-radius:999px; background:var(--card); text-decoration:none; color:var(--muted); }
+      .filters a.active { color:#fff; border-color:var(--wine); background:var(--wine); }
+      .list { display:grid; gap:14px; }
+      .card { padding:20px; border:1px solid var(--line); border-radius:18px; background:var(--card); box-shadow:0 8px 24px #4f40360b; }
+      .card-head { justify-content:space-between; align-items:flex-start; }
+      .author { margin:0; font-size:17px; }
+      .meta { color:var(--muted); font-size:12px; }
+      .badge { padding:5px 9px; border-radius:999px; background:#eee7df; color:#665b54; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.06em; }
+      .badge.sent { background:#e3eddf; color:#405835; }
+      .badge.error { background:#f7dfdf; color:#852727; }
+      .badge.platform { background:#e7e3ef; color:#51436b; }
+      .comment { margin:16px 0; padding:14px 16px; border-left:3px solid #cbb8aa; background:#f8f4ef; white-space:pre-wrap; }
+      label { display:block; margin:0 0 7px; color:var(--muted); font-size:12px; font-weight:800; letter-spacing:.06em; text-transform:uppercase; }
+      textarea { width:100%; min-height:92px; resize:vertical; padding:12px; border:1px solid var(--line); border-radius:12px; background:#fff; color:var(--ink); font:inherit; }
+      .actions { margin-top:12px; flex-wrap:wrap; }
+      .actions form,.policy form { margin:0; }
+      button,.button { display:inline-block; padding:9px 13px; border:1px solid var(--wine); border-radius:9px; background:var(--wine); color:#fff; cursor:pointer; font:700 13px/1.2 inherit; text-decoration:none; }
+      button.secondary { color:var(--wine); background:#fff; }
+      button.policy-button { color:var(--green); border-color:#aabd9d; background:#f5f9f2; }
+      button.danger { color:var(--danger); border-color:#d8a2a2; background:#fff4f4; }
+      .policy { margin-left:auto; }
+      .reason { margin:10px 0 0; color:var(--muted); font-size:12px; }
+      .empty { padding:48px; border:1px dashed #cbbfb5; border-radius:18px; text-align:center; color:var(--muted); background:var(--card); }
+      .flash { margin:12px 0; padding:11px 14px; border-radius:10px; background:#e8f0e4; }
+      .flash.error { background:#f8e4e4; color:#802727; }
+      @media(max-width:720px){ .summary,.summary.overall{grid-template-columns:repeat(2,1fr)} .card-head{display:block} .policy{margin:10px 0 0} .shell{width:min(100% - 20px,1180px)} }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <nav class="topbar"><div><a href="{{ url_for('creator.index') }}">← Posts</a> · <a href="{{ url_for('creator.metrics_dashboard') }}">Metrics</a></div>{% if session.get('creator_user') %}<a href="{{ url_for('creator.google_logout') }}">Sign out</a>{% endif %}</nav>
+      <section class="hero"><div class="hero-row"><div><p class="eyebrow">Audience conversation</p><h1>Manage Engagement</h1><p>Review what fans said, refine Chloe’s proposed response, and decide what enters the public record.</p><div class="poll-time">Last engagement poll: {% if latest_engagement_poll_time %}<time datetime="{{ latest_engagement_poll_time.isoformat() }}">{{ latest_engagement_poll_time.strftime('%b %d, %Y %H:%M:%S %Z') }}</time>{% elif latest_engagement_poll %}In progress{% else %}Never{% endif %}</div></div></div></section>
+      {% with messages = get_flashed_messages(with_categories=true) %}{% for category,message in messages %}<div class="flash {{ category }}">{{ message }}</div>{% endfor %}{% endwith %}
+      <section class="summary overall" aria-label="Captured engagement totals">
+        <div class="stat"><strong>{{ engagement_totals.posts }}</strong><span>Total posts</span></div><div class="stat"><strong>{{ engagement_totals.senders }}</strong><span>Distinct senders</span></div><div class="stat"><strong>{{ engagement_totals.comments }}</strong><span>Total comments</span></div>
+      </section>
+      <section class="summary">
+        <div class="stat"><strong>{{ counts.open }}</strong><span>Need attention</span></div><div class="stat"><strong>{{ counts.sent }}</strong><span>Replies sent</span></div><div class="stat"><strong>{{ counts.whitelisted }}</strong><span>Auto-approved fans</span></div><div class="stat"><strong>{{ counts.blocked }}</strong><span>Blocked comments</span></div>
+      </section>
+      <nav class="filters" aria-label="Engagement filters">
+        {% for key,label in [('open','Open'),('sent','Sent'),('blocked','Blocked'),('all','All')] %}<a class="{% if status_filter == key %}active{% endif %}" href="{{ url_for('creator.manage_engagement', status=key, platform=platform_filter) }}">{{ label }}</a>{% endfor %}
+      </nav>
+      <nav class="filters" aria-label="Platform filters">
+        {% for key,label in [('all','All platforms'),('facebook','Facebook'),('instagram','Instagram'),('threads','Threads')] %}<a class="{% if platform_filter == key %}active{% endif %}" href="{{ url_for('creator.manage_engagement', status=status_filter, platform=key) }}">{{ label }}</a>{% endfor %}
+      </nav>
+      <section class="list">
+        {% for row in rows %}{% set item=row.interaction %}
+          <article class="card">
+            <header class="card-head"><div><h2 class="author">{{ item.author_name or 'Unknown sender' }}</h2><div class="meta">On {% if row.post_url %}<a href="{{ row.post_url }}" target="_blank" rel="noopener">{{ row.post_title }}</a>{% else %}{{ row.post_title }}{% endif %}{% if row.received_at_eastern %} · {{ row.received_at_eastern.strftime('%b %d, %Y %H:%M %Z') }}{% endif %}</div></div><div class="policy"><span class="badge platform">{{ item.platform }}</span><span class="badge {{ item.reply_status }}">{{ item.reply_status|replace('_',' ') }}</span>{% if row.policy and row.policy.auto_approve %}<span class="badge sent">Auto-approved</span>{% endif %}</div></header>
+            <div class="comment">{{ item.body }}</div>
+            {% if item.reply_status != 'sent' and item.reply_status != 'sender_blocked' %}
+              <form method="post"><label for="reply-{{ item.id }}">Proposed Chloe reply{% if row.reply_language %} · {{ row.reply_language|upper }}{% endif %}</label><textarea id="reply-{{ item.id }}" name="reply">{{ item.suggested_reply }}</textarea><input type="hidden" name="status_filter" value="{{ status_filter }}"><input type="hidden" name="platform_filter" value="{{ platform_filter }}"><div class="actions"><button class="secondary" formaction="{{ url_for('creator.save_engagement_reply', interaction_id=item.id) }}">Save edit</button><button formaction="{{ url_for('creator.publish_engagement_reply', interaction_id=item.id) }}" onclick="return confirm('Publish this reply publicly on {{ item.platform|title }}?')">Publish reply</button></div></form>
+            {% else %}<label>Published reply</label><div class="comment">{{ item.suggested_reply or 'No reply text recorded.' }}</div>{% endif %}
+            <div class="actions">
+              {% if item.author_platform_id and not (row.policy and row.policy.blocked) %}<form action="{{ url_for('creator.whitelist_engagement_sender', interaction_id=item.id) }}" method="post"><input type="hidden" name="enable" value="{{ 'false' if row.policy and row.policy.auto_approve else 'true' }}"><input type="hidden" name="status_filter" value="{{ status_filter }}"><input type="hidden" name="platform_filter" value="{{ platform_filter }}"><button class="policy-button" type="submit">{{ 'Remove auto-approval' if row.policy and row.policy.auto_approve else 'Auto-approve this fan' }}</button></form>{% if item.platform == 'facebook' %}<form action="{{ url_for('creator.block_engagement_sender', interaction_id=item.id) }}" method="post" onsubmit="return confirm('Block {{ item.author_name|e }} from the Facebook Page? This affects every future interaction from this sender.');"><button class="danger" type="submit">Block sender</button></form>{% endif %}{% endif %}
+            </div>
+            {% if row.reply_reason %}<p class="reason">Decision note: {{ row.reply_reason }}</p>{% endif %}
+          </article>
+        {% else %}<div class="empty">No fan interactions match this view.</div>{% endfor %}
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,6 +1,7 @@
 import base64
 import os
 import re
+import time
 from pathlib import Path
 from uuid import uuid4
 
@@ -8,6 +9,7 @@ import requests
 from requests_oauthlib import OAuth1
 
 from .base import PostMetrics, PublishResult, PublisherAdapter
+from ..services.post_media import media_kind, post_media_items
 
 
 class XAdapter(PublisherAdapter):
@@ -15,6 +17,8 @@ class XAdapter(PublisherAdapter):
 
     platform = "x"
     max_text_length = 280
+    post_verification_attempts = 3
+    post_verification_delay = 1
 
     def prepare(self, post_draft):
         """Produce compact, link-free X copy without a compulsory promo footer."""
@@ -39,8 +43,27 @@ class XAdapter(PublisherAdapter):
         hashtags = []
         while cleaned and cleaned[-1].startswith("#"):
             hashtags.insert(0, cleaned.pop())
-        cleaned.extend(hashtags)
-        return "\n\n".join(cleaned)
+        suffix = "\n\n".join(hashtags)
+        body = "\n\n".join(cleaned)
+        available = self.max_text_length - len(suffix) - (2 if body and suffix else 0)
+        if available < 0:
+            suffix = self.fit_text(suffix, self.max_text_length)
+            body = ""
+        elif len(body) > available:
+            body = self.fit_text(body, available)
+        return "\n\n".join(part for part in (body, suffix) if part)
+
+    @staticmethod
+    def fit_text(value, limit):
+        if len(value) <= limit:
+            return value
+        if limit <= 3:
+            return value[:limit]
+        fragment = value[: limit - 3].rstrip()
+        word_end = fragment.rfind(" ")
+        if word_end >= max(1, (limit - 3) // 2):
+            fragment = fragment[:word_end].rstrip()
+        return f"{fragment}..."
 
     def __init__(
         self,
@@ -76,12 +99,12 @@ class XAdapter(PublisherAdapter):
                     f"{self.max_text_length}. Use the platform-specific X draft."
                 ),
             )
-        media_path = self.media_path(post_draft)
-        if not media_path or not media_path.is_file():
+        media_paths = self.supported_media(post_draft)
+        if not media_paths:
             return PublishResult(
                 success=False,
                 status="failed",
-                error_message="X image publishing requires a readable local artifact file.",
+                error_message="X requires at least one readable photo or video.",
             )
         if not self.dry_run and not all(
             (self.consumer_key, self.consumer_secret, self.access_token, self.access_token_secret)
@@ -101,7 +124,7 @@ class XAdapter(PublisherAdapter):
         if not validation.success:
             return validation
         text = self.prepare(post_draft)
-        media_path = self.media_path(post_draft)
+        media_paths = self.supported_media(post_draft)
         if self.dry_run:
             post_id = f"dry-run-x-{uuid4()}"
             return PublishResult(
@@ -109,28 +132,49 @@ class XAdapter(PublisherAdapter):
                 status="published",
                 external_post_id=post_id,
                 external_url=f"dry-run://x/{post_id}",
-                raw_response={"dry_run": True, "text": text, "media_path": str(media_path)},
-            )
-        try:
-            media = self.request(
-                "POST",
-                "/2/media/upload",
-                json={
-                    "media": base64.b64encode(media_path.read_bytes()).decode("ascii"),
-                    "media_category": "tweet_image",
-                    "media_type": self.media_type(post_draft),
-                    "shared": False,
+                raw_response={
+                    "dry_run": True,
+                    "text": text,
+                    "media_paths": [str(path) for path, _ in media_paths],
+                    "video_policy": "one video or up to four photos",
                 },
             )
-            media_id = str((media.get("data") or {}).get("id") or "")
-            if not media_id:
-                return self.failed_result("X did not return a media id.", media)
+        try:
+            media = []
+            media_ids = []
+            for media_path, media_type in media_paths:
+                uploaded = self.upload_media(media_path, media_type)
+                media_id = str((uploaded.get("data") or {}).get("id") or "")
+                if not media_id:
+                    return self.failed_result("X did not return a media id.", uploaded)
+                media.append(uploaded)
+                media_ids.append(media_id)
             published = self.request(
-                "POST", "/2/tweets", json={"text": text, "media": {"media_ids": [media_id]}}
+                "POST", "/2/tweets", json={"text": text, "media": {"media_ids": media_ids}}
             )
             post_id = str((published.get("data") or {}).get("id") or "")
             if not post_id:
                 return self.failed_result("X did not return a post id.", published)
+            verification, verification_errors = self.verify_created_post(post_id)
+            verified_id = str((verification.get("data") or {}).get("id") or "")
+            if verified_id != post_id:
+                rollback = self.rollback_unverified_post(post_id)
+                return PublishResult(
+                    success=False,
+                    status="failed",
+                    external_post_id=post_id,
+                    error_message=(
+                        "X returned a post id, but the post could not be retrieved after creation. "
+                        "Creator OS attempted to remove the unverified post before allowing a retry."
+                    ),
+                    raw_response={
+                        "media": media,
+                        "published": published,
+                        "verification": verification,
+                        "verification_errors": verification_errors,
+                        "rollback": rollback,
+                    },
+                )
         except (OSError, requests.RequestException, ValueError) as error:
             return self.failed_result(str(error), {})
         username = self.username.strip().lstrip("@")
@@ -140,8 +184,110 @@ class XAdapter(PublisherAdapter):
             status="published",
             external_post_id=post_id,
             external_url=url,
-            raw_response={"media": media, "published": published},
+            raw_response={
+                "media": media,
+                "published": published,
+                "verification": verification,
+                "verification_errors": verification_errors,
+            },
         )
+
+    def verify_created_post(self, post_id):
+        """Confirm that a newly-created post is retrievable by its author."""
+        errors = []
+        for attempt in range(self.post_verification_attempts):
+            try:
+                payload = self.request(
+                    "GET",
+                    f"/2/tweets/{post_id}",
+                    params={"tweet.fields": "created_at,author_id"},
+                )
+                if str((payload.get("data") or {}).get("id") or "") == post_id:
+                    return payload, errors
+                errors.append("X retrieval response did not contain the created post id.")
+            except (requests.RequestException, ValueError) as error:
+                errors.append(str(error))
+            if attempt + 1 < self.post_verification_attempts:
+                time.sleep(self.post_verification_delay)
+        return {}, errors
+
+    def rollback_unverified_post(self, post_id):
+        try:
+            return self.request("DELETE", f"/2/tweets/{post_id}")
+        except (requests.RequestException, ValueError) as error:
+            return {"error": str(error), "deleted": False}
+
+    def upload_media(self, media_path, media_type):
+        if not media_type.startswith("video/"):
+            return self.request(
+                "POST",
+                "/2/media/upload",
+                json={
+                    "media": base64.b64encode(media_path.read_bytes()).decode("ascii"),
+                    "media_category": "tweet_image",
+                    "media_type": media_type,
+                    "shared": False,
+                },
+            )
+
+        initialized = self.request(
+            "POST",
+            "/2/media/upload/initialize",
+            json={
+                "media_type": media_type,
+                "total_bytes": media_path.stat().st_size,
+                "media_category": "tweet_video",
+                "shared": False,
+            },
+        )
+        media_id = str((initialized.get("data") or {}).get("id") or "")
+        if not media_id:
+            raise ValueError("X did not return a media id when initializing video upload.")
+
+        chunks = []
+        with media_path.open("rb") as video:
+            segment_index = 0
+            while chunk := video.read(4 * 1024 * 1024):
+                chunks.append(
+                    self.request(
+                        "POST",
+                        f"/2/media/upload/{media_id}/append",
+                        json={
+                            "media": base64.b64encode(chunk).decode("ascii"),
+                            "segment_index": segment_index,
+                        },
+                    )
+                )
+                segment_index += 1
+
+        finalized = self.request(
+            "POST",
+            f"/2/media/upload/{media_id}/finalize",
+        )
+        status = finalized
+        for _ in range(20):
+            processing = (status.get("data") or {}).get("processing_info") or {}
+            state = str(processing.get("state") or "succeeded").lower()
+            if state == "succeeded":
+                break
+            if state == "failed":
+                detail = processing.get("error") or "X video processing failed."
+                raise ValueError(str(detail))
+            time.sleep(min(max(float(processing.get("check_after_secs") or 1), 0), 5))
+            status = self.request(
+                "GET",
+                "/2/media/upload",
+                params={"media_id": media_id},
+            )
+        else:
+            raise ValueError("X video processing did not finish in time.")
+
+        return {
+            "data": {**(finalized.get("data") or {}), "id": media_id},
+            "initialized": initialized,
+            "chunks": chunks,
+            "status": status,
+        }
 
     def unpublish(self, publication):
         if self.dry_run:
@@ -199,7 +345,14 @@ class XAdapter(PublisherAdapter):
         except ValueError:
             payload = {"raw_body": response.text}
         if not response.ok:
-            detail = payload.get("detail") or payload.get("title") or response.reason
+            nested_errors = payload.get("errors") or []
+            nested_detail = "; ".join(
+                str(item.get("message") or item.get("detail") or "").strip()
+                for item in nested_errors
+                if isinstance(item, dict)
+                and str(item.get("message") or item.get("detail") or "").strip()
+            )
+            detail = nested_detail or payload.get("detail") or payload.get("title") or response.reason
             raise ValueError(str(detail))
         return payload
 
@@ -218,6 +371,32 @@ class XAdapter(PublisherAdapter):
     def media_path(self, post_draft):
         value = str(getattr(getattr(post_draft, "artifact", None), "media_path", "") or "")
         return Path(value).expanduser() if value else None
+
+    def supported_media(self, post_draft):
+        images = []
+        videos = []
+        items = post_media_items(post_draft)
+        for item in items:
+            kind = media_kind(item)
+            if kind not in {"image", "video"}:
+                continue
+            path = Path(str(item.get("media_path") or "")).expanduser()
+            if path.is_file():
+                content_type = str(item.get("media_content_type") or "").lower()
+                target = videos if kind == "video" else images
+                target.append(
+                    (
+                        path,
+                        content_type
+                        if content_type in {
+                            "image/jpeg", "image/png", "image/webp", "video/mp4"
+                        }
+                        else ("video/mp4" if kind == "video" else "image/jpeg"),
+                    )
+                )
+        if items and media_kind(items[0]) == "video" and videos:
+            return videos[:1]
+        return images[:4] or videos[:1]
 
     def media_type(self, post_draft):
         value = str(

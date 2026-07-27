@@ -46,6 +46,42 @@ class S3MediaStorageTest(unittest.TestCase):
                 "/missing.jpg", "Missing"
             )
 
+    def test_crops_tall_image_to_instagram_portrait_limit(self):
+        with TemporaryDirectory() as directory:
+            source = Path(directory) / "tall.png"
+            destination = Path(directory) / "normalized.jpg"
+            Image.new("RGB", (800, 1800), "green").save(source)
+
+            S3MediaStorage(bucket="unused", client=Mock()).convert_to_jpeg(
+                source, destination
+            )
+
+            with Image.open(destination) as normalized:
+                self.assertEqual((800, 1000), normalized.size)
+
+    def test_uploads_video_without_image_conversion(self):
+        client = Mock()
+        client.generate_presigned_url.return_value = "https://signed.example.test/motion.mp4"
+        with TemporaryDirectory() as directory:
+            source = Path(directory) / "motion.mp4"
+            source.write_bytes(b"video")
+            result = S3MediaStorage(
+                bucket="social-bucket",
+                prefix="social",
+                client=client,
+            ).store_social_media(
+                source,
+                "Motion",
+                "video/mp4",
+                local_day=__import__("datetime").date(2026, 7, 23),
+            )
+        self.assertEqual(source, result.local_path)
+        self.assertEqual("social/2026/07/23/motion.mp4", result.object_key)
+        self.assertEqual(
+            "video/mp4",
+            client.upload_file.call_args.kwargs["ExtraArgs"]["ContentType"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

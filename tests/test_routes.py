@@ -1,14 +1,18 @@
 from io import BytesIO
+from datetime import datetime, timezone
 from tempfile import TemporaryDirectory
 import unittest
 from urllib.parse import urlparse
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from zipfile import ZipFile
 from pathlib import Path
+from types import SimpleNamespace
 
 from frikshun_creator import create_app
 from frikshun_creator.db import get_session
-from frikshun_creator.models import Artifact, PostDraft, PostMetricSnapshot, PostPublication
+from frikshun_creator.models import (
+    Artifact, EngagementSenderPolicy, MetricsPollRun, PostDraft, PostInteraction, PostMetricSnapshot, PostPublication
+)
 
 
 class RoutesTest(unittest.TestCase):
@@ -21,6 +25,7 @@ class RoutesTest(unittest.TestCase):
                 "AUTO_CREATE_TABLES": True,
                 "UPLOAD_FOLDER": self.uploads.name,
                 "MEDIA_ANALYZER_PROVIDER": "local",
+                "CUSTOM_POST_PUBLISH_SYNC": True,
                 "THREADS_APP_ID": "threads-app",
                 "THREADS_APP_SECRET": "threads-secret",
                 "THREADS_REDIRECT_URI": "https://example.test/oauth/threads/callback",
@@ -31,6 +36,24 @@ class RoutesTest(unittest.TestCase):
 
     def tearDown(self):
         self.uploads.cleanup()
+
+    def add_facebook_interaction(self, body="I remember this.", reply="A proposed reply."):
+        with self.app.app_context():
+            session = get_session()
+            artifact = Artifact(title="Engagement Signal")
+            draft = PostDraft(artifact=artifact, platform="facebook", caption="A recovered signal.", status="published")
+            publication = PostPublication(
+                post_draft=draft, platform="facebook", status="published",
+                external_post_id="facebook-post-engagement", external_url="https://facebook.test/post"
+            )
+            interaction = PostInteraction(
+                post_publication=publication, platform="facebook", interaction_type="comment",
+                external_id="comment-engagement", author_name="Archivist", author_platform_id="fan-42",
+                body=body, suggested_reply=reply, reply_status="drafted"
+            )
+            session.add(interaction)
+            session.commit()
+            return interaction.id
 
     def test_legal_pages_are_public_and_cross_linked(self):
         expectations = {
@@ -214,6 +237,48 @@ class RoutesTest(unittest.TestCase):
             artifact = get_session().get(Artifact, artifact_id)
             self.assertEqual("Still live", artifact.post_drafts[0].caption)
 
+    def test_manually_deleted_publication_can_be_confirmed_to_unlock_editing(self):
+        image_path = Path(self.uploads.name) / "manual-delete.png"
+        image_path.write_bytes(b"image")
+        with self.app.app_context():
+            session = get_session()
+            artifact = Artifact(
+                title="Recovered Fragment — Manually Deleted",
+                fragment_code="daily-fragment-run-manually-deleted",
+                media_path=str(image_path),
+            )
+            draft = PostDraft(artifact=artifact, platform="threads", caption="Was live", status="published")
+            publication = PostPublication(
+                post_draft=draft,
+                platform="threads",
+                status="published",
+                external_post_id="thread-1",
+                raw_response={"published": {"id": "thread-1"}},
+            )
+            session.add_all([artifact, draft, publication])
+            session.commit()
+            artifact_id = artifact.id
+            publication_id = publication.id
+
+        edit = self.client.get(f"/daily-fragments/{artifact_id}/edit")
+        self.assertIn(b"Confirm Threads manually deleted", edit.data)
+
+        response = self.client.post(
+            f"/daily-fragments/{artifact_id}/publications/{publication_id}/confirm-unpublished",
+            follow_redirects=True,
+        )
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"Threads was recorded as manually deleted", response.data)
+        self.assertNotIn(b"Confirm Threads manually deleted", response.data)
+        self.assertIn(b"Republish replacement", response.data)
+
+        with self.app.app_context():
+            session = get_session()
+            saved = session.get(PostPublication, publication_id)
+            self.assertEqual("unpublished", saved.status)
+            self.assertEqual("approved", saved.post_draft.status)
+            self.assertIn("confirmed_at", saved.raw_response["manual_unpublish"])
+
     def test_create_artifact_generates_drafts_and_facebook_dry_run_publishes(self):
         response = self.client.post(
             "/artifacts",
@@ -276,6 +341,94 @@ class RoutesTest(unittest.TestCase):
             self.assertEqual("published", publications[0].status)
             updated_draft = session.get(PostDraft, facebook.id)
             self.assertEqual("Edited Facebook copy for publishing.", updated_draft.caption)
+
+    def test_custom_post_workflow_curates_reviews_and_publishes_selected_platforms(self):
+        response = self.client.get("/custom-posts/new")
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"Create draft post", response.data)
+
+        response = self.client.post(
+            "/custom-posts",
+            data={
+                "image": (BytesIO(b"creator supplied image"), "memory-window.jpg"),
+                "source_text": "I found a quiet signal in this window. What does it remember?",
+                "title": "The Window Remembers",
+                "tags": "archive, morning light",
+            },
+            content_type="multipart/form-data",
+            follow_redirects=True,
+        )
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"Review curated drafts", response.data)
+        self.assertIn(b"I found a quiet signal", response.data)
+
+        with self.app.app_context():
+            session = get_session()
+            artifact = session.query(Artifact).filter_by(title="The Window Remembers").one()
+            self.assertEqual("custom_post_v1", artifact.generated_metadata["workflow"])
+            self.assertEqual(5, len(artifact.post_drafts))
+            artifact_id = artifact.id
+
+        form = {"platforms": ["facebook", "x", "fanvue"]}
+        for platform in ("facebook", "instagram", "threads", "x", "fanvue"):
+            form[f"caption_{platform}"] = f"Curated {platform} copy."
+            form[f"hashtags_{platform}"] = "ChloKat, CustomPost"
+            form[f"call_to_action_{platform}"] = ""
+        response = self.client.post(
+            f"/custom-posts/{artifact_id}/publish",
+            data=form,
+            follow_redirects=True,
+        )
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"Publishing started in the background", response.data)
+        self.assertIn(b"Publication job: Completed", response.data)
+
+        with self.app.app_context():
+            publications = get_session().query(PostPublication).all()
+            self.assertEqual(
+                {"facebook", "x", "fanvue"},
+                {publication.platform for publication in publications},
+            )
+
+    def test_custom_post_requires_an_image_and_text(self):
+        response = self.client.post(
+            "/custom-posts",
+            data={"source_text": "Words without an image."},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(400, response.status_code)
+        self.assertIn(b"Choose one or more photo or video files", response.data)
+
+    def test_custom_post_accepts_multiple_photos_and_videos(self):
+        response = self.client.post(
+            "/custom-posts",
+            data={
+                "media": [
+                    (BytesIO(b"primary image"), "primary.jpg", "image/jpeg"),
+                    (BytesIO(b"second image"), "detail.png", "image/png"),
+                    (BytesIO(b"video clip"), "motion.mp4", "video/mp4"),
+                ],
+                "source_text": "A still frame, a detail, and the moment moving.",
+                "title": "Three Views of the Signal",
+            },
+            content_type="multipart/form-data",
+            follow_redirects=True,
+        )
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"3 attachments", response.data)
+        self.assertIn(b"Video attachment 3", response.data)
+
+        with self.app.app_context():
+            artifact = get_session().query(Artifact).filter_by(
+                title="Three Views of the Signal"
+            ).one()
+            self.assertEqual(
+                ["image/png", "video/mp4"],
+                [
+                    item["media_content_type"]
+                    for item in artifact.generated_metadata["additional_media"]
+                ],
+            )
 
     def test_instagram_dry_run_publishes_public_jpeg_draft(self):
         with self.app.app_context():
@@ -436,6 +589,71 @@ class RoutesTest(unittest.TestCase):
                 "https://fresh.example.test/older-signal.jpg",
                 saved.artifact.generated_metadata["public_media_url"],
             )
+
+    def test_single_video_is_uploaded_for_instagram_and_threads(self):
+        video_path = Path(self.uploads.name) / "single-video.mp4"
+        video_path.write_bytes(b"video")
+        with self.app.app_context():
+            session = get_session()
+            artifact = Artifact(
+                title="Single Video",
+                media_path=str(video_path),
+                media_content_type="video/mp4",
+                generated_metadata={"workflow": "custom_post_v1"},
+            )
+            session.add(artifact)
+            for platform in ("instagram", "threads"):
+                session.add(
+                    PostDraft(
+                        artifact=artifact,
+                        platform=platform,
+                        caption="A moving fragment.",
+                        hashtags=["ChloKat"],
+                    )
+                )
+            session.commit()
+            artifact_id = artifact.id
+
+        stored = SimpleNamespace(
+            local_path=video_path,
+            object_key="social/2026/07/26/single-video.mp4",
+            signed_url="https://signed.example.test/single-video.mp4",
+            content_type="video/mp4",
+        )
+        with patch(
+            "frikshun_creator.routes.S3MediaStorage.store_social_media",
+            return_value=stored,
+        ) as store, patch(
+            "frikshun_creator.routes.S3MediaStorage.refresh_signed_url",
+            return_value=stored.signed_url,
+        ):
+            response = self.client.post(
+                f"/custom-posts/{artifact_id}/publish",
+                data={
+                    "platforms": ["instagram", "threads"],
+                    "caption_instagram": "A moving fragment.",
+                    "hashtags_instagram": "ChloKat",
+                    "caption_threads": "A moving fragment.",
+                    "hashtags_threads": "ChloKat",
+                },
+                follow_redirects=True,
+            )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(1, store.call_count)
+        with self.app.app_context():
+            saved = get_session().get(Artifact, artifact_id)
+            self.assertEqual(
+                "https://signed.example.test/single-video.mp4",
+                saved.generated_metadata["public_media_url"],
+            )
+            self.assertEqual(
+                {"published"},
+                {draft.status for draft in saved.post_drafts},
+            )
+        library = self.client.get("/")
+        self.assertIn(b'<video src="/custom-posts/', library.data)
+        self.assertIn(b'aria-label="Video for Single Video"', library.data)
 
     def test_threads_oauth_start_redirects_to_threads_authorize_url(self):
         response = self.client.get("/oauth/threads/start")
@@ -794,6 +1012,41 @@ class RoutesTest(unittest.TestCase):
             self.assertEqual("published", saved.status)
             self.assertEqual(1, len(saved.publications))
 
+    def test_library_publish_queues_background_job_in_live_mode(self):
+        with self.app.app_context():
+            session = get_session()
+            artifact = Artifact(title="Slow Threads Retry")
+            session.add(artifact)
+            session.flush()
+            draft = PostDraft(
+                artifact=artifact,
+                platform="threads",
+                caption="A slow carousel should outlive the web request.",
+                status="failed",
+            )
+            session.add(draft)
+            session.commit()
+            draft_id = draft.id
+            artifact_id = artifact.id
+
+        self.app.config["CUSTOM_POST_PUBLISH_SYNC"] = False
+        try:
+            with patch("frikshun_creator.routes.Thread") as thread:
+                response = self.client.post(
+                    f"/drafts/{draft_id}/publish-from-library",
+                    follow_redirects=True,
+                )
+        finally:
+            self.app.config["CUSTOM_POST_PUBLISH_SYNC"] = True
+
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"publishing started in the background", response.data)
+        thread.return_value.start.assert_called_once_with()
+        with self.app.app_context():
+            saved = get_session().get(Artifact, artifact_id)
+            self.assertEqual("queued", saved.generated_metadata["custom_publish_job"]["status"])
+            self.assertEqual(["threads"], saved.generated_metadata["custom_publish_job"]["platforms"])
+
     def test_metrics_dashboard_displays_published_post_snapshot(self):
         with self.app.app_context():
             session = get_session()
@@ -844,6 +1097,138 @@ class RoutesTest(unittest.TestCase):
         self.assertIn(b"Metric Window", response.data)
         self.assertIn(b"facebook-post-2", response.data)
         self.assertIn(b"100", response.data)
+
+    def test_manage_engagement_displays_comment_and_proposed_reply(self):
+        self.add_facebook_interaction()
+
+        response = self.client.get("/engagement")
+
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"Manage Engagement", response.data)
+        self.assertIn(b"Archivist", response.data)
+        self.assertIn(b"I remember this.", response.data)
+        self.assertIn(b"A proposed reply.", response.data)
+        self.assertIn(b"Auto-approve this fan", response.data)
+        self.assertIn(b"Block sender", response.data)
+
+    def test_manage_engagement_displays_latest_comment_poll_time(self):
+        with self.app.app_context():
+            session = get_session()
+            session.add(MetricsPollRun(
+                source="fan-comment-scheduler",
+                status="succeeded",
+                started_at=datetime(2026, 7, 22, 17, 15, tzinfo=timezone.utc),
+                completed_at=datetime(2026, 7, 22, 17, 15, 8, tzinfo=timezone.utc),
+            ))
+            session.commit()
+
+        response = self.client.get("/engagement")
+
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"Last engagement poll", response.data)
+        self.assertIn(b"Jul 22, 2026 13:15:08 EDT", response.data)
+
+    def test_manage_engagement_displays_total_posts_senders_and_comments(self):
+        self.add_facebook_interaction()
+        with self.app.app_context():
+            session = get_session()
+            session.add_all([
+                PostInteraction(
+                    platform="facebook", interaction_type="comment", external_id="comment-two",
+                    external_post_id="facebook-post-two", author_name="Second Fan",
+                    author_platform_id="fan-84", body="Second comment.", reply_status="pending_review",
+                ),
+                PostInteraction(
+                    platform="facebook", interaction_type="comment", external_id="comment-three",
+                    external_post_id="facebook-post-two", author_name="Archivist",
+                    author_platform_id="fan-42", body="Third comment.", reply_status="pending_review",
+                ),
+            ])
+            session.commit()
+
+        response = self.client.get("/engagement")
+
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b'<strong>2</strong><span>Total posts</span>', response.data)
+        self.assertIn(b'<strong>2</strong><span>Distinct senders</span>', response.data)
+        self.assertIn(b'<strong>3</strong><span>Total comments</span>', response.data)
+
+    def test_manage_engagement_can_edit_and_publish_reply(self):
+        interaction_id = self.add_facebook_interaction()
+        response = self.client.post(
+            f"/engagement/{interaction_id}/save", data={"reply": "Edited Chloe reply."}, follow_redirects=True
+        )
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"Proposed reply saved", response.data)
+
+        response = self.client.post(
+            f"/engagement/{interaction_id}/publish", data={"reply": "Edited Chloe reply."}, follow_redirects=True
+        )
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"Reply published to Facebook", response.data)
+        with self.app.app_context():
+            interaction = get_session().get(PostInteraction, interaction_id)
+            self.assertEqual("sent", interaction.reply_status)
+            self.assertEqual("Edited Chloe reply.", interaction.suggested_reply)
+
+    def test_manage_engagement_filters_and_publishes_instagram_reply(self):
+        with self.app.app_context():
+            session = get_session()
+            interaction = PostInteraction(
+                platform="instagram", interaction_type="comment", external_id="ig-comment-1",
+                external_post_id="ig-media-1", author_name="ig_fan", author_platform_id="ig_fan",
+                body="I remember this too.", suggested_reply="Then keep the fragment.", reply_status="drafted",
+            )
+            session.add(interaction)
+            session.commit()
+            interaction_id = interaction.id
+
+        filtered = self.client.get("/engagement?status=open&platform=instagram")
+        self.assertEqual(200, filtered.status_code)
+        self.assertIn(b"ig_fan", filtered.data)
+        self.assertIn(b"Instagram", filtered.data)
+
+        adapter = Mock()
+        adapter.reply_to_comment.return_value = {"id": "ig-reply-1"}
+        with patch("frikshun_creator.routes.instagram_adapter", return_value=adapter):
+            response = self.client.post(
+                f"/engagement/{interaction_id}/publish",
+                data={"reply": "Then keep the fragment.", "platform_filter": "instagram"},
+                follow_redirects=True,
+            )
+
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"Reply published to Instagram", response.data)
+        adapter.reply_to_comment.assert_called_once_with("ig-comment-1", "Then keep the fragment.")
+
+    def test_manage_engagement_can_whitelist_sender(self):
+        interaction_id = self.add_facebook_interaction()
+
+        response = self.client.post(
+            f"/engagement/{interaction_id}/whitelist", data={"enable": "true"}, follow_redirects=True
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"added to automatic approval", response.data)
+        with self.app.app_context():
+            policy = get_session().query(EngagementSenderPolicy).one()
+            self.assertTrue(policy.auto_approve)
+            self.assertFalse(policy.blocked)
+
+    def test_manage_engagement_can_block_sender_in_dry_run(self):
+        interaction_id = self.add_facebook_interaction()
+
+        response = self.client.post(f"/engagement/{interaction_id}/block", follow_redirects=True)
+
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"was blocked from the Facebook Page", response.data)
+        with self.app.app_context():
+            session = get_session()
+            policy = session.query(EngagementSenderPolicy).one()
+            interaction = session.get(PostInteraction, interaction_id)
+            self.assertTrue(policy.blocked)
+            self.assertFalse(policy.auto_approve)
+            self.assertEqual("sender_blocked", interaction.reply_status)
 
 
 if __name__ == "__main__":

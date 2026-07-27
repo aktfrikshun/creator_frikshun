@@ -72,6 +72,57 @@ class S3MediaStorage:
         )
         return StoredMedia(jpeg_path, object_key, signed_url)
 
+    def store_social_media(
+        self,
+        source_path,
+        title,
+        content_type,
+        local_day=None,
+        output_dir=None,
+    ):
+        if str(content_type or "").lower().startswith("image/"):
+            return self.store_instagram_image(
+                source_path,
+                title,
+                local_day=local_day,
+                output_dir=output_dir,
+            )
+        if not str(content_type or "").lower().startswith("video/"):
+            raise ValueError(f"Unsupported social media type: {content_type}")
+        if not self.bucket:
+            raise ValueError("S3_MEDIA_BUCKET is required for video publishing.")
+        source_path = Path(source_path)
+        if not source_path.is_file():
+            raise ValueError(f"Media file does not exist: {source_path}")
+        local_day = local_day or date.today()
+        object_key = "/".join(
+            part
+            for part in (
+                self.prefix,
+                f"{local_day.year:04d}",
+                f"{local_day.month:02d}",
+                f"{local_day.day:02d}",
+                source_path.name,
+            )
+            if part
+        )
+        self.client.upload_file(
+            str(source_path),
+            self.bucket,
+            object_key,
+            ExtraArgs={
+                "ContentType": content_type,
+                "CacheControl": "public, max-age=31536000, immutable",
+                "ServerSideEncryption": "AES256",
+            },
+        )
+        signed_url = self.client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": self.bucket, "Key": object_key},
+            ExpiresIn=self.presign_seconds,
+        )
+        return StoredMedia(source_path, object_key, signed_url, content_type=content_type)
+
     def refresh_signed_url(self, object_key):
         return self.client.generate_presigned_url(
             "get_object",
@@ -89,6 +140,22 @@ class S3MediaStorage:
                 image = background
             elif image.mode != "RGB":
                 image = image.convert("RGB")
+            width, height = image.size
+            aspect_ratio = width / height
+            if aspect_ratio < 0.8:
+                image = ImageOps.fit(
+                    image,
+                    (width, max(1, round(width / 0.8))),
+                    method=Image.Resampling.LANCZOS,
+                    centering=(0.5, 0.5),
+                )
+            elif aspect_ratio > 1.91:
+                image = ImageOps.fit(
+                    image,
+                    (max(1, round(height * 1.91)), height),
+                    method=Image.Resampling.LANCZOS,
+                    centering=(0.5, 0.5),
+                )
             image.save(destination_path, "JPEG", quality=92, optimize=True, progressive=True)
 
     def slug(self, value):

@@ -9,6 +9,7 @@ from uuid import uuid4
 import requests
 
 from .base import PostInteractionData, PostMetrics, PublishResult, PublisherAdapter
+from ..services.post_media import media_kind, post_media_items
 
 
 class ThreadsAdapter(PublisherAdapter):
@@ -71,13 +72,15 @@ class ThreadsAdapter(PublisherAdapter):
                 status="failed",
                 error_message="THREADS_ACCESS_TOKEN is required when THREADS_DRY_RUN=false.",
             )
-        image_url = self.media_url(post_draft)
-        if image_url and urlparse(image_url).scheme != "https":
-            return PublishResult(
-                success=False,
-                status="failed",
-                error_message="Threads media URLs must use HTTPS.",
-            )
+        for item in self.media_items(post_draft):
+            if media_kind(item) not in {"image", "video"}:
+                return PublishResult(False, "failed", error_message="Threads supports photos and videos only.")
+            if urlparse(str(item.get("public_media_url") or "")).scheme != "https":
+                return PublishResult(
+                    success=False,
+                    status="failed",
+                    error_message="Every Threads attachment requires a public HTTPS URL.",
+                )
         return PublishResult(success=True, status="validated")
 
     def publish(self, post_draft):
@@ -86,8 +89,9 @@ class ThreadsAdapter(PublisherAdapter):
             return validation
 
         text = self.prepare(post_draft)
+        media = self.media_items(post_draft)
         media_url = self.media_url(post_draft)
-        media_type = self.media_type(post_draft, media_url)
+        media_type = "CAROUSEL" if len(media) > 1 else self.media_type(post_draft, media_url)
         if self.dry_run:
             external_post_id = f"dry-run-threads-{uuid4()}"
             return PublishResult(
@@ -100,6 +104,7 @@ class ThreadsAdapter(PublisherAdapter):
                     "media_type": media_type,
                     "text": text,
                     "media_url": media_url,
+                    "media_urls": [item.get("public_media_url") for item in media],
                 },
             )
 
@@ -107,14 +112,23 @@ class ThreadsAdapter(PublisherAdapter):
         status = {}
         stage = "create_container"
         try:
-            container = self.create_container(text=text, media_url=media_url, media_type=media_type)
+            if len(media) > 1:
+                container, child_containers = self.create_carousel(text, media)
+            else:
+                container = self.create_container(text=text, media_url=media_url, media_type=media_type)
+                child_containers = []
             creation_id = str(container.get("id") or "")
             if not creation_id:
                 return self.failed_result("Threads did not return a creation id.", container)
 
-            if media_type in {"IMAGE", "VIDEO"}:
+            if media_type in {"IMAGE", "VIDEO", "CAROUSEL"}:
                 stage = "wait_for_container"
-                status = self.wait_for_container(creation_id)
+                status = self.wait_for_container(
+                    creation_id,
+                    attempts=max(180, self.status_attempts)
+                    if media_type == "CAROUSEL"
+                    else None,
+                )
                 if status.get("status") != "FINISHED":
                     message = status.get("error_message") or status.get("status") or "Threads media processing failed."
                     return self.failed_result(
@@ -123,7 +137,7 @@ class ThreadsAdapter(PublisherAdapter):
                     )
 
             stage = "publish_container"
-            published = self.publish_container(creation_id)
+            published = self.publish_container_with_retry(creation_id)
             thread_id = str(published.get("id") or "")
             if not thread_id:
                 return self.failed_result("Threads did not return a published post id.", published)
@@ -146,6 +160,7 @@ class ThreadsAdapter(PublisherAdapter):
             external_url=str(details.get("permalink") or ""),
             raw_response={
                 "container": container,
+                "child_containers": child_containers,
                 "status": status,
                 "published": published,
                 "thread": details,
@@ -175,21 +190,69 @@ class ThreadsAdapter(PublisherAdapter):
     def verify_identity(self):
         return self.graph_get("me", {"fields": "id,username"})
 
-    def create_container(self, text, media_url="", media_type="TEXT"):
+    def create_container(self, text, media_url="", media_type="TEXT", reply_to_id=""):
         payload = {"media_type": media_type, "text": text}
+        if reply_to_id:
+            payload["reply_to_id"] = reply_to_id
         if media_type == "IMAGE" and media_url:
             payload["image_url"] = media_url
         if media_type == "VIDEO" and media_url:
             payload["video_url"] = media_url
         return self.graph_post("me/threads", payload)
 
+    def create_carousel(self, text, media):
+        children = []
+        child_containers = []
+        for item in media[:20]:
+            kind = media_kind(item)
+            payload = {
+                "media_type": kind.upper(),
+                "is_carousel_item": "true",
+            }
+            payload[f"{kind}_url"] = item["public_media_url"]
+            child = self.graph_post("me/threads", payload)
+            child_id = str(child.get("id") or "")
+            if not child_id:
+                raise ValueError("Threads did not return a carousel child id.")
+            status = self.wait_for_container(child_id, attempts=max(180, self.status_attempts))
+            if status.get("status") != "FINISHED":
+                raise ValueError(
+                    status.get("error_message")
+                    or status.get("status")
+                    or "Threads carousel attachment processing failed."
+                )
+            children.append(child_id)
+            child_containers.append({"container": child, "status": status})
+        parent = self.graph_post(
+            "me/threads",
+            {
+                "media_type": "CAROUSEL",
+                "children": ",".join(children),
+                "text": text,
+            },
+        )
+        return parent, child_containers
+
     def publish_container(self, creation_id):
         return self.graph_post("me/threads_publish", {"creation_id": creation_id})
 
-    def wait_for_container(self, creation_id):
+    def publish_container_with_retry(self, creation_id, attempts=3):
+        last_error = None
+        for attempt in range(attempts):
+            try:
+                return self.publish_container(creation_id)
+            except ValueError as error:
+                last_error = error
+                if "code 24" not in str(error) or attempt + 1 >= attempts:
+                    raise
+                time.sleep(max(2, self.status_delay))
+        raise last_error
+
+    def wait_for_container(self, creation_id, attempts=None):
+        attempts = attempts or self.status_attempts
         last_status = {}
         last_error = None
-        for attempt in range(self.status_attempts):
+        for attempt in range(attempts):
             try:
                 last_status = self.graph_get(creation_id, {"fields": "status,error_message"})
                 last_error = None
@@ -198,7 +261,7 @@ class ThreadsAdapter(PublisherAdapter):
             else:
                 if last_status.get("status") in {"FINISHED", "ERROR", "EXPIRED"}:
                     return last_status
-            if attempt + 1 < self.status_attempts and self.status_delay:
+            if attempt + 1 < attempts and self.status_delay:
                 time.sleep(self.status_delay)
         if last_error:
             raise last_error
@@ -273,12 +336,105 @@ class ThreadsAdapter(PublisherAdapter):
                     external_id=str(item.get("id") or ""),
                     external_post_id=post_publication.external_post_id,
                     author_name=str(item.get("username") or ""),
+                    author_platform_id=str(item.get("username") or ""),
                     body=str(item.get("text") or ""),
                     received_at=self.parse_threads_time(item.get("timestamp")),
                     raw_payload=item,
                 )
             )
         return [interaction for interaction in interactions if interaction.external_id]
+
+    def fetch_account_interactions(self):
+        """Fetch replies from every thread on the connected Threads account."""
+        if self.dry_run:
+            return []
+        interactions = []
+        identity = self.graph_get("me", {"fields": "id,username"})
+        own_username = str(identity.get("username") or "").casefold()
+        threads_url = self.graph_url("me/threads")
+        params = {
+            "fields": "id,text,timestamp,permalink",
+            "limit": 100,
+            "access_token": self.current_access_token(),
+        }
+        seen_urls = set()
+        while threads_url and threads_url not in seen_urls:
+            seen_urls.add(threads_url)
+            payload = self.graph_request_url(threads_url, params=params)
+            params = None
+            for thread in payload.get("data") or []:
+                thread_id = str(thread.get("id") or "")
+                if not thread_id:
+                    continue
+                replies_url = self.graph_url(f"{thread_id}/conversation")
+                reply_params = {
+                    "fields": "id,text,timestamp,username,is_reply_owned_by_me,replied_to{id}",
+                    "reverse": "false",
+                    "limit": 100,
+                    "access_token": self.current_access_token(),
+                }
+                seen_reply_urls = set()
+                conversation_items = []
+                while replies_url and replies_url not in seen_reply_urls:
+                    seen_reply_urls.add(replies_url)
+                    replies = self.graph_request_url(replies_url, params=reply_params)
+                    reply_params = None
+                    conversation_items.extend(replies.get("data") or [])
+                    replies_url = (replies.get("paging") or {}).get("next")
+                owned_parent_ids = {
+                    str((item.get("replied_to") or {}).get("id") or "")
+                    for item in conversation_items
+                    if item.get("is_reply_owned_by_me") is True
+                    or (own_username and str(item.get("username") or "").casefold() == own_username)
+                }
+                for item in conversation_items:
+                    reply_id = str(item.get("id") or "")
+                    if not reply_id:
+                        continue
+                    raw_payload = dict(item)
+                    username = str(item.get("username") or "")
+                    owned_by_me = bool(
+                        reply_id == thread_id
+                        or item.get("is_reply_owned_by_me") is True
+                        or (own_username and username.casefold() == own_username)
+                    )
+                    raw_payload.update({
+                        "source_post_message": str(thread.get("text") or ""),
+                        "source_post_permalink": str(thread.get("permalink") or ""),
+                        "source_post_created_time": str(thread.get("timestamp") or ""),
+                        "is_owned_by_me": owned_by_me,
+                        "already_replied_by_us": reply_id in owned_parent_ids,
+                    })
+                    interactions.append(PostInteractionData(
+                        platform=self.platform,
+                        interaction_type="reply",
+                        external_id=reply_id,
+                        external_post_id=thread_id,
+                        author_name=username,
+                        author_platform_id=username,
+                        body=str(item.get("text") or ""),
+                        received_at=self.parse_threads_time(item.get("timestamp")),
+                        raw_payload=raw_payload,
+                    ))
+            threads_url = (payload.get("paging") or {}).get("next")
+        return interactions
+
+    def reply_to_reply(self, reply_id, message):
+        reply_id = str(reply_id or "").strip()
+        message = str(message or "").strip()
+        if not reply_id or not message:
+            raise ValueError("Threads reply id and reply message are required.")
+        if self.dry_run:
+            return {"id": f"dry-run-threads-reply-{reply_id}"}
+        container = self.create_container(text=message, media_type="TEXT", reply_to_id=reply_id)
+        creation_id = str(container.get("id") or "")
+        if not creation_id:
+            raise ValueError("Threads did not return a reply creation id.")
+        return self.publish_container(creation_id)
+
+    def graph_request_url(self, url, params=None):
+        response = requests.get(url, params=params, timeout=30)
+        return self.response_payload(response)
 
     def parse_insights(self, payload):
         parsed = {}
@@ -347,6 +503,13 @@ class ThreadsAdapter(PublisherAdapter):
         if self.media_base_url and media_path:
             return f"{self.media_base_url}/{quote(Path(media_path).name)}"
         return ""
+
+    def media_items(self, post_draft):
+        items = post_media_items(post_draft)
+        for index, item in enumerate(items):
+            if not item.get("public_media_url") and index == 0:
+                item["public_media_url"] = self.media_url(post_draft)
+        return items[:20]
 
     def media_type(self, post_draft, media_url):
         content_type = str(
@@ -435,6 +598,6 @@ class ThreadsAdapter(PublisherAdapter):
             available = max(0, limit - len(fallback) - 1)
             prefix = truncated[:available].rstrip()
             if prefix and prefix[-1] not in ".!":
-                prefix = f"{prefix}."
+                prefix = f"{prefix[:max(0, available - 1)].rstrip()}."
             truncated = f"{prefix} {fallback}".strip()
-        return truncated
+        return truncated[:limit]

@@ -47,7 +47,7 @@ The local interface can now:
 - Publish a Facebook draft through `FacebookAdapter`.
 - Record publication attempts.
 - Poll live post metrics for connected platforms.
-- Review views, reach, likes, comments, shares, clicks, and incoming comments/messages.
+- Review views, reach, likes, comments, shares, clicks, and supported public comments.
 
 Facebook publishing defaults to dry-run mode so the full workflow can be tested without sending anything to Meta.
 
@@ -297,7 +297,20 @@ FanVue uses OAuth 2.0 publishing, media, and insights APIs. The private app requ
 
 The FanVue adapter uploads the shared local post image through FanVue's multipart media API, waits for processing, and creates a free `followers-and-subscribers` post. Daily runs may use `--fanvue-body` for closer platform-native copy. The legacy `--fanvue-image` option remains available for older custom workflows but is no longer required. Likes, comments, and comment text feed the shared metrics and interaction-review UI.
 
-The interaction queue is intentionally review-first. It is the staging area for the planned scheduled process that will fetch new comments/messages and prepare Chloe-voice replies before anything is sent.
+The interaction queue is intentionally review-first. It is the staging area for the planned scheduled process that will fetch supported public comments and prepare Chloe-voice replies before anything is sent. Personal-profile direct messages are excluded by policy; fans are directed to engage publicly through comments on the official Facebook Page.
+
+### Meta-platform fan engagement
+
+Creator OS paginates through the complete Facebook Page, Instagram, and Threads post histories regardless of publishing origin; fetches Facebook/Instagram comments and Threads replies; generates short Chloe-voice drafts; and publishes approved replies through each platform's API. Russian interactions receive Russian replies. Sensitive, private, commercial, sexual, safety-related, or canon-uncertain interactions remain pending for review. Sender auto-approval is scoped separately to each platform.
+
+```bash
+flask --app app engage-facebook-comments
+flask --app app engage-facebook-comments --live
+```
+
+The command name is retained for launchd compatibility, but it polls all three Meta platforms. It is review-only unless `FAN_COMMENT_AUTO_REPLY=true`; it stores drafts without publishing. `--live` is an explicit one-run override. Live Facebook replies require `pages_manage_engagement`; Instagram requires `instagram_manage_comments`; Threads requires `threads_read_replies` and `threads_manage_replies`.
+
+The launchd definition at `ops/launchd/com.frikshun.creator-fan-comments.plist` runs the command every 15 minutes. Keep review-only mode enabled until the token permissions and generated replies have been verified against live Page comments.
 
 ## Boundary
 

@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, patch
 import requests
+from PIL import Image
 
 from frikshun_creator.services.daily_fragment_generator import (
     CONTENT_LANES,
@@ -521,7 +522,7 @@ class DailyFragmentGeneratorTest(unittest.TestCase):
 
             self.assertEqual([], warnings)
 
-    def test_missing_image_receives_neutral_fallback(self):
+    def test_missing_image_receives_chloe_thinking_fallback(self):
         with TemporaryDirectory() as directory:
             public_path = Path(directory) / "public.png"
             warnings = []
@@ -532,7 +533,9 @@ class DailyFragmentGeneratorTest(unittest.TestCase):
             )
 
             self.assertTrue(public_path.is_file())
-            self.assertIn("neutral local fallback", warnings[0])
+            with Image.open(public_path) as image:
+                self.assertEqual((1024, 1024), image.size)
+            self.assertIn("Chloe thinking archive fallback", warnings[0])
 
     def json_response(self, payload):
         response = Mock()

@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    {% set publish_job = artifact.generated_metadata.get('custom_publish_job') or {} %}
+    {% if publish_job.get('status') in ['queued', 'running'] %}<meta http-equiv="refresh" content="8">{% endif %}
+    <title>Review {{ artifact.title }} · Creator OS</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: #101114; color: #f4f1ea; font-family: system-ui, sans-serif; }
+      main { width: min(1180px, calc(100% - 32px)); margin: 0 auto; padding: 30px 0 60px; }
+      a { color: #d8c9bc; }
+      h1 { margin: 12px 0 6px; font-family: Georgia, serif; font-size: clamp(32px, 5vw, 50px); }
+      .lede { color: #bbb4aa; }
+      .layout { display: grid; grid-template-columns: minmax(250px, 360px) 1fr; gap: 22px; align-items: start; margin-top: 26px; }
+      .image-card, .draft { border: 1px solid #343841; border-radius: 16px; background: #181a1f; overflow: hidden; }
+      .image-card { position: sticky; top: 20px; }
+      .image-card img { display: block; width: 100%; aspect-ratio: 1; object-fit: cover; }
+      .image-card video { display: block; width: 100%; aspect-ratio: 1; object-fit: cover; background: #08090b; }
+      .media-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px; background: #101114; }
+      .media-grid > * { min-width: 0; }
+      .image-card div { padding: 16px; color: #bbb4aa; line-height: 1.45; }
+      form { display: grid; gap: 14px; }
+      .draft { padding: 18px; }
+      .draft-head { display: flex; justify-content: space-between; gap: 14px; align-items: center; margin-bottom: 12px; }
+      .draft h2 { margin: 0; text-transform: capitalize; }
+      .status { border: 1px solid #496250; border-radius: 999px; padding: 4px 9px; color: #bce6c9; font-size: 12px; }
+      label { display: grid; gap: 6px; margin-top: 10px; color: #ccc5bb; font-weight: 700; }
+      textarea, input[type="text"] { width: 100%; border: 1px solid #414650; border-radius: 9px; padding: 11px 12px; background: #101114; color: #fff; font: inherit; }
+      textarea { min-height: 150px; resize: vertical; line-height: 1.5; }
+      .publish-choice { display: flex; gap: 9px; align-items: center; margin: 0; }
+      .actions { position: sticky; bottom: 12px; display: flex; flex-wrap: wrap; gap: 10px; padding: 14px; border: 1px solid #494e59; border-radius: 14px; background: rgba(24, 26, 31, .96); box-shadow: 0 10px 30px #0008; }
+      button { border: 0; border-radius: 999px; padding: 12px 18px; background: #343841; color: #fff; font: inherit; font-weight: 850; cursor: pointer; }
+      button.primary { background: #d34d56; }
+      .flash { border-radius: 10px; padding: 11px 13px; margin: 12px 0; background: #223128; color: #d7f7df; }
+      .flash.error { background: #3a2225; color: #ffd5d9; }
+      .job { margin: 18px 0; padding: 16px; border: 1px solid #454b57; border-radius: 12px; background: #191c22; }
+      .job ul { margin: 10px 0 0; padding-left: 20px; }
+      @media (max-width: 800px) { .layout { grid-template-columns: 1fr; } .image-card { position: static; } }
+    </style>
+  </head>
+  <body>
+    <main>
+      <a href="{{ url_for('creator.index') }}">← Back to post library</a>
+      <h1>Review curated drafts</h1>
+      <p class="lede">{{ artifact.title }} · Edit freely, choose destinations, then publish with one confirmation.</p>
+
+      {% for category, message in get_flashed_messages(with_categories=true) %}
+        <div class="flash {{ category }}">{{ message }}</div>
+      {% endfor %}
+
+      {% if publish_job %}
+        <section class="job" aria-label="Publication progress">
+          <strong>Publication job: {{ publish_job.get('status', 'unknown')|title }}</strong>
+          {% if publish_job.get('status') in ['queued', 'running'] %}<span> · This page refreshes automatically.</span>{% endif %}
+          {% if publish_job.get('results') %}
+            <ul>
+              {% for platform, result in publish_job.get('results').items() %}
+                <li>{{ platform|title }} — {{ result.get('status')|title }}{% if result.get('message') %}: {{ result.get('message') }}{% endif %}</li>
+              {% endfor %}
+            </ul>
+          {% endif %}
+        </section>
+      {% endif %}
+
+      <div class="layout">
+        <aside class="image-card">
+          <div class="media-grid">
+            {% for item in media_items %}
+              {% if item.media_content_type.startswith('video/') %}
+                <video src="{{ url_for('creator.custom_post_media', artifact_id=artifact.id, item_index=loop.index0) }}" controls preload="metadata" aria-label="Video attachment {{ loop.index }}"></video>
+              {% else %}
+                <img src="{{ url_for('creator.custom_post_media', artifact_id=artifact.id, item_index=loop.index0) }}" alt="Image attachment {{ loop.index }} for {{ artifact.title }}">
+              {% endif %}
+            {% endfor %}
+          </div>
+          <div>{{ media_items|length }} attachment{% if media_items|length != 1 %}s{% endif %} · The first is primary.<br><br>{{ artifact.summary }}</div>
+        </aside>
+
+        <form method="post">
+          {% for platform in platforms %}
+            {% set draft = drafts.get(platform) %}
+            {% if draft %}
+              {% set live = draft.status == 'published' and draft.publications|selectattr('status', 'equalto', 'published')|list %}
+              <section class="draft">
+                <div class="draft-head">
+                  <h2>{{ platform }}</h2>
+                  <label class="publish-choice">
+                    <input type="checkbox" name="platforms" value="{{ platform }}" {% if not live %}checked{% else %}disabled{% endif %}>
+                    {% if live %}<span class="status">Published</span>{% else %}Publish{% endif %}
+                  </label>
+                </div>
+                {% if platform == 'facebook' %}
+                  <p>Facebook: multiple photos are attached; when photos and videos are mixed, the adapter follows the primary asset and compatible Page-post format.</p>
+                {% elif platform == 'instagram' %}
+                  <p>Instagram: up to 10 photos and videos are assembled as a carousel.</p>
+                {% elif platform == 'threads' %}
+                  <p>Threads: photos and videos are uploaded individually and assembled as one carousel.</p>
+                {% elif platform == 'x' %}
+                  <p>X: up to four photos or one video are attached.</p>
+                {% elif platform == 'fanvue' %}
+                  <p>FanVue: up to 10 photos and videos are attached to the post.</p>
+                {% endif %}
+                <label>
+                  Caption
+                  <textarea name="caption_{{ platform }}">{{ draft.caption }}</textarea>
+                </label>
+                <label>
+                  Call to action
+                  <input type="text" name="call_to_action_{{ platform }}" value="{{ draft.call_to_action }}">
+                </label>
+                <label>
+                  Hashtags
+                  <input type="text" name="hashtags_{{ platform }}" value="{{ draft.hashtags|join(', ') }}">
+                </label>
+                {% for publication in draft.publications if publication.status == 'published' and publication.external_url %}
+                  <p><a href="{{ publication.external_url }}" target="_blank" rel="noopener">Open published {{ platform|title }} post ↗</a></p>
+                {% endfor %}
+              </section>
+            {% endif %}
+          {% endfor %}
+          <div class="actions">
+            <button type="submit" formaction="{{ url_for('creator.save_custom_post', artifact_id=artifact.id) }}">Save drafts</button>
+            <button class="primary" type="submit" formaction="{{ url_for('creator.publish_custom_post', artifact_id=artifact.id) }}" onclick="return confirm('Publish the checked drafts to their live platforms?');" {% if publish_job.get('status') in ['queued', 'running'] %}disabled{% endif %}>Publish selected platforms</button>
+          </div>
+        </form>
+      </div>
+    </main>
+  </body>
+</html>

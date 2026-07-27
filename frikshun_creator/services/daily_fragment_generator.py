@@ -9,7 +9,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import requests
-from PIL import Image, ImageDraw
+from PIL import Image
 
 from .daily_fragment_workflow import DailyFragmentPackage
 
@@ -21,6 +21,9 @@ DEFAULT_CHLOE_REFERENCE_IMAGE_CANDIDATES = (
     Path(
         "/Users/allentaylor/src/frikshun_marketing/archives/chloe-katastrophe/visuals/reference_boards/chloe/CHLOE_REFERENCE_BOARD_V1.png"
     ),
+)
+CHLOE_THINKING_FALLBACK_IMAGE = (
+    Path(__file__).resolve().parent.parent / "assets" / "chloe-thinking-fallback-v1.png"
 )
 
 CONTENT_LANES = (
@@ -259,17 +262,16 @@ class DailyFragmentGenerator:
         if public_path.is_file():
             return
 
-        self.write_neutral_fallback_image(public_path)
-        warnings.append("Image generation failed; a neutral local fallback image was used.")
+        self.write_chloe_fallback_image(public_path)
+        warnings.append("Image generation failed; the Chloe thinking archive fallback was used.")
 
-    def write_neutral_fallback_image(self, destination_path):
+    def write_chloe_fallback_image(self, destination_path):
         destination_path.parent.mkdir(parents=True, exist_ok=True)
-        image = Image.new("RGB", (1024, 1024), color=(23, 20, 22))
-        draw = ImageDraw.Draw(image, "RGBA")
-        draw.ellipse((545, -210, 1175, 420), fill=(126, 40, 57, 70))
-        draw.ellipse((-260, 590, 390, 1240), fill=(72, 58, 83, 75))
-        draw.line((130, 860, 895, 160), fill=(224, 204, 190, 42), width=3)
-        image.save(destination_path, "PNG")
+        with Image.open(CHLOE_THINKING_FALLBACK_IMAGE) as image:
+            image.convert("RGB").resize((1024, 1024), Image.Resampling.LANCZOS).save(
+                destination_path,
+                "PNG",
+            )
 
     def image_error_summary(self, error):
         response = getattr(error, "response", None)

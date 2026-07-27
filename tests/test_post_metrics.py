@@ -39,6 +39,27 @@ class FakeMetricsAdapter:
             )
         ]
 
+    def fetch_page_interactions(self):
+        return []
+
+
+class PageWideCommentsAdapter(FakeMetricsAdapter):
+    def fetch_post_interactions(self, publication):
+        return []
+
+    def fetch_page_interactions(self):
+        return [PostInteractionData(
+            platform="facebook",
+            interaction_type="comment",
+            external_id="manual-comment-1",
+            external_post_id="manual-post-1",
+            author_name="External Fan",
+            author_platform_id="fan-99",
+            body="Found you through Facebook.",
+            received_at=datetime(2026, 7, 22, 18, 5, tzinfo=timezone.utc),
+            raw_payload={"source_post_message": "Manual post"},
+        )]
+
 
 class MissingPostAdapter:
     def fetch_post_metrics(self, publication):
@@ -119,6 +140,26 @@ class PostMetricsPollerTest(unittest.TestCase):
             self.assertEqual(2, session.query(PostMetricSnapshot).count())
             self.assertEqual(1, session.query(PostInteraction).count())
             self.assertEqual(2, session.query(MetricsPollRun).count())
+
+    def test_poller_imports_comments_from_posts_outside_creator_os(self):
+        with self.app.app_context():
+            session = get_session()
+            artifact = Artifact(title="Known post")
+            draft = PostDraft(artifact=artifact, platform="facebook", caption="Known.", status="published")
+            publication = PostPublication(
+                post_draft=draft, platform="facebook", status="published", external_post_id="known-post"
+            )
+            session.add(publication)
+            session.commit()
+
+            result = PostMetricsPoller(
+                session, adapters={"facebook": PageWideCommentsAdapter()}
+            ).run(platform="facebook")
+
+            interaction = session.query(PostInteraction).filter_by(external_id="manual-comment-1").one()
+            self.assertEqual(1, result.interactions_created)
+            self.assertIsNone(interaction.post_publication_id)
+            self.assertEqual("manual-post-1", interaction.external_post_id)
 
     def test_poller_skips_recorded_dry_run_publications(self):
         with self.app.app_context():

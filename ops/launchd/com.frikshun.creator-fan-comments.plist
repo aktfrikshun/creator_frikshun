@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.frikshun.creator-fan-comments</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/allentaylor/src/creator_frikshun/.venv/bin/flask</string>
+    <string>--app</string>
+    <string>app</string>
+    <string>engage-facebook-comments</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/allentaylor/src/creator_frikshun</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Minute</key><integer>15</integer></dict>
+    <dict><key>Minute</key><integer>30</integer></dict>
+    <dict><key>Minute</key><integer>45</integer></dict>
+  </array>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/Users/allentaylor/Library/Logs/FrikShun/fan-comments.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/allentaylor/Library/Logs/FrikShun/fan-comments-error.log</string>
+</dict>
+</plist>

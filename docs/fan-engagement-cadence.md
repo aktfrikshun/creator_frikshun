@@ -2,6 +2,16 @@
 
 Ordinary daily posts should end when the thought ends. Do not append a standing archive, music, FanVue, funding, or “links in bio” message. Chloe's profile bios carry those persistent destinations.
 
+## Personal-profile boundary
+
+Chloe does not conduct fan conversations through direct messages sent to a personal Facebook profile. Do not read, ingest, draft individualized replies to, or automatically answer those messages. Do not automatically accept or decline friend requests.
+
+When a fan needs direction, Allen may send a single manual routing notice and end the private exchange:
+
+> I keep fan conversations in the light, where the signal can be shared. Please join me in the comments on the Chloe Katastrophe Facebook Page, and I’ll meet you there.
+
+Do not continue the direct-message conversation after that notice. Never use browser automation or personal-profile credentials to monitor Messenger. Fan engagement belongs in comments on the official Page, where substantive public comments can enter the normal review-first engagement workflow.
+
 ## Weekly conversational engagement
 
 Twice each week, pause broadcasting and participate:
@@ -13,6 +23,20 @@ Twice each week, pause broadcasting and participate:
 - Do not force a link or promotional call to action into these exchanges.
 
 Recommended reminder: Tuesday and Friday at 6:00 p.m. America/New_York.
+
+## Automated Page-comment replies
+
+Creator OS may automatically reply, as the Chloe Katastrophe Facebook Page, to eligible public comments on every published Page post, regardless of whether the post originated in Creator OS, Facebook itself, or another authorized publishing tool. It must never extend this automation to personal-profile comments, direct messages, or friend requests.
+
+- Reply in Chloe's established voice and address the substance of the comment rather than issuing generic thanks.
+- Reply in the commenter's language. Russian comments must receive natural contemporary Russian replies.
+- Keep replies concise, normally one or two sentences, without hashtags, promotional links, signatures, or invitations to private messaging.
+- Do not invent memories, relationships, biographical facts, promises, or canon.
+- Hold threats, self-harm, sexual content, minors, requests to meet privately, personal data, money, business proposals, uncertain canon, and moderation-sensitive hostility for Allen's review.
+- Ignore spam, empty comments, and comments authored by the Page itself.
+- Record the source comment, generated reply, language, model, disposition, and Facebook reply ID for audit and duplicate prevention.
+
+The scheduled job runs every 15 minutes across Facebook, Instagram, and Threads. `FAN_COMMENT_AUTO_REPLY=false` keeps it in review-only mode; sender-level auto-approval remains platform-specific. Enable global live mode only after Facebook `pages_manage_engagement`, Instagram `instagram_manage_comments`, and Threads reply permissions have been verified.
 
 ## Biweekly participation invitation
 

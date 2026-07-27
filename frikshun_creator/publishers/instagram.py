@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import time
@@ -9,12 +10,14 @@ from uuid import uuid4
 import requests
 
 from .base import PostInteractionData, PostMetrics, PublishResult, PublisherAdapter
+from ..services.post_media import media_kind, post_media_items
 
 
 class InstagramAdapter(PublisherAdapter):
     """Publish image feed posts and video reels through Instagram's Graph API."""
 
     platform = "instagram"
+    DEFAULT_TAG_USERNAMES = ("allenktaylor",)
 
     def __init__(
         self,
@@ -25,6 +28,7 @@ class InstagramAdapter(PublisherAdapter):
         dry_run=None,
         status_attempts=10,
         status_delay=1,
+        tag_usernames=None,
     ):
         self.user_id = user_id or os.getenv("INSTAGRAM_USER_ID", "")
         self.access_token = access_token or os.getenv("INSTAGRAM_ACCESS_TOKEN", "")
@@ -35,6 +39,15 @@ class InstagramAdapter(PublisherAdapter):
         self.dry_run = dry_run
         self.status_attempts = status_attempts
         self.status_delay = status_delay
+        if tag_usernames is None:
+            configured = os.getenv("INSTAGRAM_TAG_USERNAMES", "")
+            tag_usernames = configured.split(",") if configured.strip() else self.DEFAULT_TAG_USERNAMES
+        self.tag_usernames = tuple(
+            username.strip().lstrip("@")
+            for username in tag_usernames
+            if username and username.strip().lstrip("@")
+        )
+        self.tag_warnings = []
 
     def prepare(self, post_draft):
         """Produce an Instagram-safe caption with no raw external links."""
@@ -69,12 +82,24 @@ class InstagramAdapter(PublisherAdapter):
         if not base_result.success:
             return base_result
 
-        if self.is_image_post(post_draft) and self.media_content_type(post_draft) != "image/jpeg":
-            return PublishResult(
-                success=False,
-                status="failed",
-                error_message="Instagram image publishing requires a JPEG artifact.",
-            )
+        media = self.media_items(post_draft)
+        if not media:
+            return PublishResult(False, "failed", error_message="Instagram requires media.")
+        for item in media:
+            if media_kind(item) == "image" and item["media_content_type"] != "image/jpeg":
+                return PublishResult(
+                    success=False,
+                    status="failed",
+                    error_message="Instagram image publishing requires JPEG attachments.",
+                )
+            if media_kind(item) not in {"image", "video"}:
+                return PublishResult(False, "failed", error_message="Instagram supports photos and videos only.")
+            if urlparse(str(item.get("public_media_url") or "")).scheme != "https":
+                return PublishResult(
+                    False,
+                    "failed",
+                    error_message="Every Instagram attachment requires a public HTTPS media URL.",
+                )
         if not self.is_image_post(post_draft) and not self.is_video_post(post_draft):
             return PublishResult(
                 success=False,
@@ -117,7 +142,12 @@ class InstagramAdapter(PublisherAdapter):
 
         caption = self.prepare(post_draft)
         media_url = self.media_url(post_draft)
-        publish_kind = "reel" if self.is_video_post(post_draft) else "single_image"
+        media = self.media_items(post_draft)
+        publish_kind = (
+            "carousel"
+            if len(media) > 1
+            else ("reel" if self.is_video_post(post_draft) else "single_image")
+        )
         if self.dry_run:
             external_post_id = f"dry-run-instagram-{uuid4()}"
             return PublishResult(
@@ -129,18 +159,29 @@ class InstagramAdapter(PublisherAdapter):
                     "dry_run": True,
                     "user_id": self.user_id,
                     "media_url": media_url,
+                    "media_urls": [item.get("public_media_url") for item in media],
                     "caption": caption,
                     "publish_kind": publish_kind,
+                    "user_tags": self.image_user_tags(),
                 },
             )
 
         try:
-            container = self.create_container(post_draft, media_url, caption)
+            if len(media) > 1:
+                container, child_containers = self.create_carousel(media, caption)
+            else:
+                container = self.create_container(post_draft, media_url, caption)
+                child_containers = []
             creation_id = str(container.get("id") or "")
             if not creation_id:
                 return self.failed_result("Instagram did not return a creation id.", container)
 
-            status = self.wait_for_container(creation_id)
+            status = self.wait_for_container(
+                creation_id,
+                attempts=max(180, self.status_attempts)
+                if publish_kind in {"carousel", "reel"}
+                else None,
+            )
             if status.get("status_code") != "FINISHED":
                 message = (
                     status.get("status")
@@ -164,10 +205,12 @@ class InstagramAdapter(PublisherAdapter):
             external_url=str(details.get("permalink") or ""),
             raw_response={
                 "container": container,
+                "child_containers": child_containers,
                 "status": status,
                 "published": published,
                 "media": details,
                 "publish_kind": publish_kind,
+                "tag_warnings": self.tag_warnings,
             },
         )
 
@@ -196,18 +239,86 @@ class InstagramAdapter(PublisherAdapter):
             payload["video_url"] = media_url
         else:
             payload["image_url"] = media_url
-        return self.graph_post(f"{self.user_id}/media", payload)
+            self.add_image_user_tags(payload)
+        return self.create_media_container(payload)
+
+    def create_carousel(self, media, caption):
+        child_containers = []
+        child_ids = []
+        for item in media[:10]:
+            payload = {"is_carousel_item": "true"}
+            if media_kind(item) == "video":
+                payload.update(
+                    {"media_type": "VIDEO", "video_url": item["public_media_url"]}
+                )
+            else:
+                payload["image_url"] = item["public_media_url"]
+                self.add_image_user_tags(payload)
+            child = self.create_media_container(payload)
+            child_id = str(child.get("id") or "")
+            if not child_id:
+                raise ValueError("Instagram did not return a carousel child id.")
+            status = self.wait_for_container(child_id, attempts=max(180, self.status_attempts))
+            if status.get("status_code") != "FINISHED":
+                raise ValueError(
+                    status.get("status")
+                    or status.get("error_message")
+                    or "Instagram carousel attachment processing failed."
+                )
+            child_containers.append({"container": child, "status": status})
+            child_ids.append(child_id)
+        parent = self.graph_post(
+            f"{self.user_id}/media",
+            {
+                "media_type": "CAROUSEL",
+                "children": ",".join(child_ids),
+                "caption": caption,
+            },
+        )
+        return parent, child_containers
+
+    def add_image_user_tags(self, payload):
+        user_tags = self.image_user_tags()
+        if user_tags:
+            payload["user_tags"] = json.dumps(user_tags)
+
+    def create_media_container(self, payload):
+        try:
+            return self.graph_post(f"{self.user_id}/media", payload)
+        except ValueError as error:
+            if "user_tags" not in payload or "invalid user id" not in str(error).lower():
+                raise
+            untagged_payload = dict(payload)
+            untagged_payload.pop("user_tags", None)
+            self.tag_warnings.append(
+                "Instagram rejected the configured photo tag; this media was published without it."
+            )
+            return self.graph_post(f"{self.user_id}/media", untagged_payload)
+
+    def image_user_tags(self):
+        if not self.tag_usernames:
+            return []
+        count = len(self.tag_usernames)
+        return [
+            {
+                "username": username,
+                "x": round((index + 1) / (count + 1), 3),
+                "y": 0.5,
+            }
+            for index, username in enumerate(self.tag_usernames)
+        ]
 
     def publish_container(self, creation_id):
         return self.graph_post(f"{self.user_id}/media_publish", {"creation_id": creation_id})
 
-    def wait_for_container(self, creation_id):
+    def wait_for_container(self, creation_id, attempts=None):
+        attempts = attempts or self.status_attempts
         last_status = {}
-        for attempt in range(self.status_attempts):
+        for attempt in range(attempts):
             last_status = self.graph_get(creation_id, {"fields": "status_code,status"})
             if last_status.get("status_code") in ("FINISHED", "ERROR", "EXPIRED"):
                 return last_status
-            if attempt + 1 < self.status_attempts and self.status_delay:
+            if attempt + 1 < attempts and self.status_delay:
                 time.sleep(self.status_delay)
         return last_status
 
@@ -252,6 +363,16 @@ class InstagramAdapter(PublisherAdapter):
         if self.media_base_url and media_path:
             return f"{self.media_base_url}/{quote(Path(media_path).name)}"
         return ""
+
+    def media_items(self, post_draft):
+        items = post_media_items(post_draft)
+        for index, item in enumerate(items):
+            if not item.get("public_media_url") and index == 0:
+                item["public_media_url"] = self.media_url(post_draft)
+            item["media_content_type"] = str(
+                item.get("media_content_type") or ""
+            ).lower()
+        return items[:10]
 
     def media_content_type(self, post_draft):
         artifact = getattr(post_draft, "artifact", None)
@@ -314,6 +435,7 @@ class InstagramAdapter(PublisherAdapter):
                 external_id=str(comment.get("id") or ""),
                 external_post_id=post_publication.external_post_id,
                 author_name=str(comment.get("username") or ""),
+                author_platform_id=str(comment.get("username") or ""),
                 body=str(comment.get("text") or ""),
                 received_at=self.parse_time(comment.get("timestamp")),
                 raw_payload=comment,
@@ -321,6 +443,100 @@ class InstagramAdapter(PublisherAdapter):
             for comment in payload.get("data") or []
             if comment.get("id")
         ]
+
+    def fetch_account_interactions(self):
+        """Fetch comments from every media item on the connected Instagram account."""
+        if self.dry_run or not self.user_id:
+            return []
+        interactions = []
+        identity = self.graph_request_url(
+            self.graph_url(self.user_id),
+            params={"fields": "id,username", "access_token": self.access_token},
+        )
+        own_id = str(identity.get("id") or self.user_id)
+        own_username = str(identity.get("username") or "").casefold()
+        media_url = self.graph_url(f"{self.user_id}/media")
+        params = {
+            "fields": "id,caption,permalink,timestamp",
+            "limit": 100,
+            "access_token": self.access_token,
+        }
+        seen_urls = set()
+        while media_url and media_url not in seen_urls:
+            seen_urls.add(media_url)
+            payload = self.graph_request_url(media_url, params=params)
+            params = None
+            for media in payload.get("data") or []:
+                media_id = str(media.get("id") or "")
+                if not media_id:
+                    continue
+                comment_url = self.graph_url(f"{media_id}/comments")
+                comment_params = {
+                    "fields": "id,text,timestamp,username,from{id,username},replies.limit(100){id,username,from{id,username}}",
+                    "limit": 100,
+                    "access_token": self.access_token,
+                }
+                seen_comment_urls = set()
+                while comment_url and comment_url not in seen_comment_urls:
+                    seen_comment_urls.add(comment_url)
+                    comments = self.graph_request_url(comment_url, params=comment_params)
+                    comment_params = None
+                    for comment in comments.get("data") or []:
+                        comment_id = str(comment.get("id") or "")
+                        if not comment_id:
+                            continue
+                        raw_payload = dict(comment)
+                        author = comment.get("from") or {}
+                        username = str(comment.get("username") or author.get("username") or "")
+                        author_id = str(author.get("id") or username)
+                        owned_by_me = bool(
+                            (own_id and str(author.get("id") or "") == own_id)
+                            or (own_username and username.casefold() == own_username)
+                        )
+                        replies = (comment.get("replies") or {}).get("data") or []
+                        already_replied = any(
+                            (own_id and str((reply.get("from") or {}).get("id") or "") == own_id)
+                            or (
+                                own_username
+                                and str(reply.get("username") or (reply.get("from") or {}).get("username") or "").casefold()
+                                == own_username
+                            )
+                            for reply in replies
+                        )
+                        raw_payload.update({
+                            "source_post_message": str(media.get("caption") or ""),
+                            "source_post_permalink": str(media.get("permalink") or ""),
+                            "source_post_created_time": str(media.get("timestamp") or ""),
+                            "is_owned_by_me": owned_by_me,
+                            "already_replied_by_us": already_replied,
+                        })
+                        interactions.append(PostInteractionData(
+                            platform=self.platform,
+                            interaction_type="comment",
+                            external_id=comment_id,
+                            external_post_id=media_id,
+                            author_name=username,
+                            author_platform_id=author_id,
+                            body=str(comment.get("text") or ""),
+                            received_at=self.parse_time(comment.get("timestamp")),
+                            raw_payload=raw_payload,
+                        ))
+                    comment_url = (comments.get("paging") or {}).get("next")
+            media_url = (payload.get("paging") or {}).get("next")
+        return interactions
+
+    def reply_to_comment(self, comment_id, message):
+        comment_id = str(comment_id or "").strip()
+        message = str(message or "").strip()
+        if not comment_id or not message:
+            raise ValueError("Instagram comment id and reply message are required.")
+        if self.dry_run:
+            return {"id": f"dry-run-instagram-reply-{comment_id}"}
+        return self.graph_post(f"{comment_id}/replies", {"message": message})
+
+    def graph_request_url(self, url, params=None):
+        response = requests.get(url, params=params, timeout=30)
+        return self.response_payload(response)
 
     def parse_time(self, value):
         if not value:

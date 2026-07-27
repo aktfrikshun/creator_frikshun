@@ -290,6 +290,20 @@ class PostInteraction(Base):
     post_publication: Mapped[Optional[PostPublication]] = relationship(back_populates="interactions")
 
 
+class EngagementSenderPolicy(Base):
+    __tablename__ = "creator_engagement_sender_policies"
+    __table_args__ = (UniqueConstraint("platform", "author_platform_id", name="uq_engagement_sender_policy"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    platform: Mapped[str] = mapped_column(String(80), nullable=False)
+    author_platform_id: Mapped[str] = mapped_column(String(240), nullable=False)
+    author_name: Mapped[str] = mapped_column(String(240), default="")
+    auto_approve: Mapped[bool] = mapped_column(Boolean, default=False)
+    blocked: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class Campaign(Base):
     __tablename__ = "creator_campaigns"
 

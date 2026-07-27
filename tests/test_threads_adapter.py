@@ -1,6 +1,6 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from frikshun_creator.publishers.threads import ThreadsAdapter
 
@@ -51,6 +51,58 @@ class ThreadsAdapterTest(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual("VIDEO", result.raw_response["media_type"])
 
+    def test_dry_run_builds_mixed_media_carousel(self):
+        draft = self.draft()
+        draft.artifact.generated_metadata["additional_media"] = [
+            {
+                "media_path": "motion.mp4",
+                "media_content_type": "video/mp4",
+                "public_media_url": "https://cdn.example.test/motion.mp4",
+            }
+        ]
+        result = ThreadsAdapter(dry_run=True).publish(draft)
+        self.assertTrue(result.success)
+        self.assertEqual("CAROUSEL", result.raw_response["media_type"])
+        self.assertEqual(2, len(result.raw_response["media_urls"]))
+
+    def test_live_carousel_waits_for_parent_before_publish(self):
+        draft = self.draft()
+        draft.artifact.generated_metadata["additional_media"] = [
+            {
+                "media_path": "detail.jpg",
+                "media_content_type": "image/jpeg",
+                "public_media_url": "https://cdn.example.test/detail.jpg",
+            }
+        ]
+        adapter = ThreadsAdapter(
+            access_token="threads-token",
+            dry_run=False,
+            status_attempts=2,
+            status_delay=0,
+        )
+        with patch.object(
+            adapter,
+            "graph_post",
+            side_effect=[
+                {"id": "child-1"},
+                {"id": "child-2"},
+                {"id": "parent-1"},
+                {"id": "thread-1"},
+            ],
+        ), patch.object(
+            adapter,
+            "wait_for_container",
+            return_value={"status": "FINISHED"},
+        ) as wait, patch.object(
+            adapter,
+            "fetch_thread_with_retry",
+            return_value={"permalink": "https://threads.test/carousel"},
+        ):
+            result = adapter.publish(draft)
+        self.assertTrue(result.success)
+        self.assertEqual("parent-1", wait.call_args_list[-1].args[0])
+        self.assertEqual(180, wait.call_args_list[-1].kwargs["attempts"])
+
     def test_prepare_removes_links_and_legacy_standing_footer(self):
         draft = self.draft(
             caption=(
@@ -75,6 +127,21 @@ class ThreadsAdapterTest(unittest.TestCase):
         self.assertEqual(1, prepared.count("?"))
         self.assertNotIn("links are available through my bio", prepared.lower())
 
+    def test_prepare_does_not_overflow_with_long_compound_hashtag(self):
+        draft = self.draft(caption="A greenhouse remembers what I cannot. " * 20)
+        draft.hashtags = [
+            "ChloeKatastrophe#DaughterOfEchoes#CyberneticChloe#FutureMemory"
+            "#TruthAndBeautyFromDarkness#AIArt",
+            "ChloeKatastrophe",
+            "ChloKat",
+            "FrikShun",
+        ]
+
+        prepared = ThreadsAdapter(dry_run=True).prepare(draft)
+
+        self.assertLessEqual(len(prepared), 500)
+        self.assertEqual(1, prepared.count("?"))
+
     def test_live_uploads_container_then_publishes(self):
         responses = [
             self.response({"id": "container-1"}),
@@ -90,6 +157,18 @@ class ThreadsAdapterTest(unittest.TestCase):
         self.assertEqual("https://www.threads.net/@chloe/post/thread-1", result.external_url)
         self.assertIn("/v1.0/me/threads", post.call_args_list[0].args[0])
         self.assertIn("/v1.0/thread-1", get.call_args_list[-1].args[0])
+
+    def test_publish_retries_transient_missing_media(self):
+        adapter = ThreadsAdapter(dry_run=False, access_token="threads-token", status_delay=0)
+        with patch.object(
+            adapter,
+            "publish_container",
+            side_effect=[ValueError("media cannot be found (code 24)"), {"id": "thread-1"}],
+        ) as publish, patch("frikshun_creator.publishers.threads.time.sleep"):
+            result = adapter.publish_container_with_retry("container-1")
+
+        self.assertEqual({"id": "thread-1"}, result)
+        self.assertEqual(2, publish.call_count)
 
     def test_live_uploads_video_container_then_publishes(self):
         responses = [
@@ -220,6 +299,43 @@ class ThreadsAdapterTest(unittest.TestCase):
         self.assertEqual(1, len(interactions))
         self.assertEqual("reply-1", interactions[0].external_id)
         self.assertEqual("allen", interactions[0].author_name)
+
+    def test_fetch_account_interactions_covers_threads_outside_creator_os(self):
+        adapter = ThreadsAdapter(access_token="threads-token", dry_run=False)
+        adapter.graph_get = Mock(return_value={"id": "our-id", "username": "chloekat"})
+        adapter.graph_request_url = Mock(side_effect=[
+            {"data": [{
+                "id": "thread-older", "text": "Recovered room.",
+                "permalink": "https://threads.test/t/older", "timestamp": "2026-07-01T12:00:00Z",
+            }]},
+            {"data": [
+                {
+                    "id": "reply-older", "username": "archivist", "text": "Still listening.",
+                    "timestamp": "2026-07-22T12:00:00Z", "replied_to": {"id": "thread-older"},
+                },
+                {
+                    "id": "our-reply", "username": "chloekat", "text": "I hear you.",
+                    "is_reply_owned_by_me": True, "replied_to": {"id": "reply-older"},
+                },
+            ]},
+        ])
+
+        interactions = adapter.fetch_account_interactions()
+
+        self.assertEqual(2, len(interactions))
+        self.assertEqual("thread-older", interactions[0].external_post_id)
+        self.assertEqual("archivist", interactions[0].author_platform_id)
+        self.assertEqual("https://threads.test/t/older", interactions[0].raw_payload["source_post_permalink"])
+        self.assertTrue(interactions[0].raw_payload["already_replied_by_us"])
+        self.assertTrue(interactions[1].raw_payload["is_owned_by_me"])
+
+    def test_reply_to_reply_creates_and_publishes_reply_container(self):
+        adapter = ThreadsAdapter(access_token="threads-token", dry_run=False)
+        with patch.object(adapter, "graph_post", side_effect=[{"id": "container-1"}, {"id": "reply-post-1"}]) as post:
+            payload = adapter.reply_to_reply("reply-1", "I hear you.")
+
+        self.assertEqual("reply-post-1", payload["id"])
+        self.assertEqual("reply-1", post.call_args_list[0].args[1]["reply_to_id"])
 
 
 if __name__ == "__main__":

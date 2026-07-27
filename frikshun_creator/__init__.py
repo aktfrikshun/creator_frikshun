@@ -10,7 +10,7 @@ import secrets
 from datetime import timedelta
 
 from .db import close_session, configure_database, init_db
-from .models import Artifact, PostDraft, PostPublication
+from .models import Artifact, MetricsPollRun, PostDraft, PostPublication
 from .publishers.facebook import FacebookAdapter
 from .publishers.instagram import InstagramAdapter
 from .publishers.threads import ThreadsAdapter
@@ -29,6 +29,7 @@ from .services.daily_fragment_workflow import (
     store_daily_fragment_package,
 )
 from .services.post_metrics import PostMetricsPoller
+from .services.fan_comment_responder import FanCommentResponder
 from .services.account_analytics_runner import AccountAnalyticsRunner
 from .services.meta_token_manager import MetaTokenManager
 from .services.sample_artifact_importer import SampleArtifactImporter
@@ -48,6 +49,10 @@ def create_app(config_overrides=None):
     app.config.setdefault("UPLOAD_FOLDER", str(project_root / "instance" / "uploads"))
     app.config.setdefault("MEDIA_ANALYZER_PROVIDER", os.getenv("MEDIA_ANALYZER_PROVIDER", "auto"))
     app.config.setdefault("OPENAI_VISION_MODEL", os.getenv("OPENAI_VISION_MODEL", "gpt-4.1-mini"))
+    app.config.setdefault(
+        "CUSTOM_POST_PUBLISH_SYNC",
+        os.getenv("CUSTOM_POST_PUBLISH_SYNC", "false").lower() == "true",
+    )
     app.config.setdefault("OPENAI_RATE_LIMIT_RETRIES", int(os.getenv("OPENAI_RATE_LIMIT_RETRIES", "8")))
     app.config.setdefault("OPENAI_RATE_LIMIT_MAX_SLEEP_SECONDS", int(os.getenv("OPENAI_RATE_LIMIT_MAX_SLEEP_SECONDS", "60")))
     app.config.setdefault("TIKTOK_REEL_VIDEO_PROVIDER", os.getenv("TIKTOK_REEL_VIDEO_PROVIDER", "animatic"))
@@ -57,6 +62,9 @@ def create_app(config_overrides=None):
     app.config.setdefault("FACEBOOK_DRY_RUN", os.getenv("FACEBOOK_DRY_RUN", "true").lower() != "false")
     app.config.setdefault("FACEBOOK_PAGE_ID", os.getenv("FACEBOOK_PAGE_ID", ""))
     app.config.setdefault("FACEBOOK_PAGE_ACCESS_TOKEN", os.getenv("FACEBOOK_PAGE_ACCESS_TOKEN", ""))
+    app.config.setdefault("FAN_COMMENT_AUTO_REPLY", os.getenv("FAN_COMMENT_AUTO_REPLY", "false").lower() == "true")
+    app.config.setdefault("FAN_COMMENT_REPLY_MODEL", os.getenv("FAN_COMMENT_REPLY_MODEL", "gpt-4.1-mini"))
+    app.config.setdefault("FAN_COMMENT_REPLY_LIMIT", int(os.getenv("FAN_COMMENT_REPLY_LIMIT", "20")))
     app.config.setdefault("META_USER_ACCESS_TOKEN", os.getenv("META_USER_ACCESS_TOKEN", ""))
     app.config.setdefault(
         "META_SHORT_LIVED_USER_ACCESS_TOKEN",
@@ -184,10 +192,29 @@ def create_app(config_overrides=None):
         )
 
     @app.cli.command("poll-post-metrics")
-    def poll_post_metrics_command():
+    @click.option("--force", is_flag=True, help="Run even if today's scheduled poll already completed.")
+    def poll_post_metrics_command(force):
         from .db import get_session
 
         session = get_session()
+        today_utc = datetime.now(timezone.utc).date()
+        latest_scheduled_poll = (
+            session.query(MetricsPollRun)
+            .filter(MetricsPollRun.source == "scheduler")
+            .order_by(MetricsPollRun.started_at.desc())
+            .first()
+        )
+        if (
+            not force
+            and latest_scheduled_poll is not None
+            and latest_scheduled_poll.started_at.date() == today_utc
+        ):
+            click.echo(
+                "Metrics poll skipped: the daily scheduled poll already ran today "
+                f"at {latest_scheduled_poll.started_at.isoformat()}."
+            )
+            return
+
         result = PostMetricsPoller(session).run()
         account_result = AccountAnalyticsRunner(session, app.config).run()
         click.echo(
@@ -209,6 +236,63 @@ def create_app(config_overrides=None):
         for error in result.errors:
             click.echo(f"ERROR: {error}", err=True)
         for error in account_result.errors:
+            click.echo(f"ERROR: {error}", err=True)
+
+    @app.cli.command("engage-facebook-comments")
+    @click.option("--live", is_flag=True, help="Publish eligible replies even if FAN_COMMENT_AUTO_REPLY is false.")
+    @click.option("--limit", type=click.IntRange(1, 100), default=None)
+    def engage_facebook_comments_command(live, limit):
+        """Fetch Meta-platform fan interactions and prepare or publish Chloe-voice replies."""
+        from .db import get_session
+
+        session = get_session()
+        facebook = FacebookAdapter(
+            page_id=app.config.get("FACEBOOK_PAGE_ID"),
+            access_token=app.config.get("FACEBOOK_PAGE_ACCESS_TOKEN"),
+            graph_version=app.config.get("FACEBOOK_GRAPH_VERSION"),
+            dry_run=app.config.get("FACEBOOK_DRY_RUN"),
+            target_type=app.config.get("FACEBOOK_TARGET_TYPE"),
+        )
+        instagram = InstagramAdapter(
+            user_id=app.config.get("INSTAGRAM_USER_ID"),
+            access_token=app.config.get("INSTAGRAM_ACCESS_TOKEN"),
+            graph_version=app.config.get("INSTAGRAM_GRAPH_VERSION"),
+            media_base_url=app.config.get("INSTAGRAM_MEDIA_BASE_URL"),
+            dry_run=app.config.get("INSTAGRAM_DRY_RUN"),
+        )
+        threads = ThreadsAdapter(
+            access_token=app.config.get("THREADS_ACCESS_TOKEN"),
+            oauth=ThreadsOAuth(
+                app_id=app.config.get("THREADS_APP_ID"),
+                app_secret=app.config.get("THREADS_APP_SECRET"),
+                redirect_uri=app.config.get("THREADS_REDIRECT_URI"),
+                token_path=app.config.get("THREADS_TOKEN_PATH"),
+                auth_url=app.config.get("THREADS_AUTH_URL"),
+                api_base_url=app.config.get("THREADS_API_BASE_URL"),
+            ),
+            api_version=app.config.get("THREADS_API_VERSION"),
+            base_url=app.config.get("THREADS_API_BASE_URL"),
+            media_base_url=app.config.get("THREADS_MEDIA_BASE_URL"),
+            dry_run=app.config.get("THREADS_DRY_RUN"),
+        )
+        adapters = {"facebook": facebook, "instagram": instagram, "threads": threads}
+        poll = PostMetricsPoller(session, adapters=adapters).run(source="fan-comment-scheduler")
+        responder = FanCommentResponder(
+            session=session,
+            adapters=adapters,
+            api_key=os.getenv("OPENAI_API_KEY"),
+            model=app.config.get("FAN_COMMENT_REPLY_MODEL"),
+            page_id=app.config.get("FACEBOOK_PAGE_ID"),
+            live=bool(live or app.config.get("FAN_COMMENT_AUTO_REPLY")),
+        )
+        result = responder.run(limit=limit or app.config.get("FAN_COMMENT_REPLY_LIMIT", 20))
+        click.echo(
+            f"Meta engagement complete: {poll.interactions_created} new interactions, "
+            f"{result.generated} replies generated, {result.sent} sent, "
+            f"{result.held} held, {result.ignored} ignored, {len(result.errors)} errors; "
+            f"mode={'live' if responder.live else 'review-only'}."
+        )
+        for error in [*poll.errors, *result.errors]:
             click.echo(f"ERROR: {error}", err=True)
 
     @app.cli.command("sync-account-analytics")

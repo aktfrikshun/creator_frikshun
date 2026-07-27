@@ -49,6 +49,17 @@
         <form action="{{ url_for('creator.unpublish_daily_fragment', artifact_id=artifact.id) }}" method="post" onsubmit="return confirm('Remove the live platform posts? Their URLs and engagement cannot be preserved when you republish.');">
           <div class="actions"><button class="danger" type="submit">Unpublish live post</button></div>
         </form>
+        <div class="panel">
+          <h2>Deleted one manually?</h2>
+          <p class="muted">After deleting a post directly on its platform, confirm it here so Creator no longer treats it as live.</p>
+          <div class="actions">
+            {% for publication in active_publications %}
+              <form action="{{ url_for('creator.confirm_publication_unpublished', artifact_id=artifact.id, publication_id=publication.id) }}" method="post" onsubmit="return confirm('Only continue if you have already deleted the {{ publication.platform|title }} post. Creator will allow a replacement to be published.');">
+                <button class="secondary" type="submit">Confirm {{ publication.platform|title }} manually deleted</button>
+              </form>
+            {% endfor %}
+          </div>
+        </div>
       {% endif %}
 
       <form action="{{ url_for('creator.update_daily_fragment', artifact_id=artifact.id) }}" method="post" enctype="multipart/form-data">

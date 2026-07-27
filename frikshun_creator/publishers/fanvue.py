@@ -9,6 +9,7 @@ import requests
 
 from .base import PostInteractionData, PostMetrics, PublishResult, PublisherAdapter
 from ..services.fanvue_oauth import FanvueOAuth
+from ..services.post_media import media_kind, post_media_items
 
 
 class FanvueAdapter(PublisherAdapter):
@@ -29,9 +30,9 @@ class FanvueAdapter(PublisherAdapter):
         result = super().validate(post_draft)
         if not result.success:
             return result
-        path = self.media_path(post_draft)
-        if not path or not path.is_file():
-            return PublishResult(False, "failed", error_message="FanVue publishing requires a readable local image artifact.")
+        media = self.media(post_draft)
+        if not media or any(not path.is_file() for path, _ in media):
+            return PublishResult(False, "failed", error_message="FanVue publishing requires readable local media attachments.")
         if self.audience not in {"subscribers", "followers-and-subscribers"}:
             return PublishResult(False, "failed", error_message="FANVUE_AUDIENCE is invalid.")
         if not self.dry_run:
@@ -46,26 +47,23 @@ class FanvueAdapter(PublisherAdapter):
         if not validation.success:
             return validation
         text = self.prepare(post_draft)
-        path = self.media_path(post_draft)
+        media_items = self.media(post_draft)
         if self.dry_run:
             post_id = f"dry-run-fanvue-{uuid4()}"
             return PublishResult(True, "published", post_id, f"dry-run://fanvue/{post_id}",
-                                 raw_response={"dry_run": True, "text": text, "media_path": str(path), "audience": self.audience})
+                                 raw_response={"dry_run": True, "text": text,
+                                               "media_path": str(media_items[0][0]),
+                                               "media_paths": [str(path) for path, _ in media_items],
+                                               "audience": self.audience})
         try:
-            upload = self.api("POST", "/media/uploads", json={
-                "name": path.stem[:255], "filename": path.name[:255],
-                "mediaType": "image", "sizeBytes": path.stat().st_size,
-            })
-            media_uuid = str(upload.get("mediaUuid") or "")
-            upload_id = str(upload.get("uploadId") or "")
-            part_size = int(upload.get("partSize") or path.stat().st_size)
-            parts = self.upload_parts(path, upload_id, part_size)
-            completed = self.api("PATCH", f"/media/uploads/{upload_id}", json={"parts": parts})
-            media = self.wait_for_media(media_uuid)
-            if media.get("status") != "ready":
-                return self.failed_result(f"FanVue media processing ended with status {media.get('status') or 'unknown'}.", {"upload": upload, "completed": completed, "media": media})
+            uploads = []
+            media_uuids = []
+            for path, kind in media_items:
+                uploaded = self.upload_media(path, kind)
+                uploads.append(uploaded)
+                media_uuids.append(uploaded["media_uuid"])
             post = self.api("POST", "/posts", json={
-                "text": text, "mediaUuids": [media_uuid], "audience": self.audience,
+                "text": text, "mediaUuids": media_uuids, "audience": self.audience,
             })
             post_id = str(post.get("uuid") or "")
             if not post_id:
@@ -74,7 +72,29 @@ class FanvueAdapter(PublisherAdapter):
             return self.failed_result(str(error), {})
         return PublishResult(True, "published", post_id,
                              f"https://www.fanvue.com/chloekat/post/{post_id}",
-                             raw_response={"upload": upload, "completed": completed, "media": media, "post": post})
+                             raw_response={"uploads": uploads, "post": post})
+
+    def upload_media(self, path, kind):
+        upload = self.api("POST", "/media/uploads", json={
+            "name": path.stem[:255], "filename": path.name[:255],
+            "mediaType": kind, "sizeBytes": path.stat().st_size,
+        })
+        media_uuid = str(upload.get("mediaUuid") or "")
+        upload_id = str(upload.get("uploadId") or "")
+        part_size = int(upload.get("partSize") or path.stat().st_size)
+        parts = self.upload_parts(path, upload_id, part_size)
+        completed = self.api("PATCH", f"/media/uploads/{upload_id}", json={"parts": parts})
+        processed = self.wait_for_media(media_uuid)
+        if processed.get("status") != "ready":
+            raise ValueError(
+                f"FanVue media processing ended with status {processed.get('status') or 'unknown'}."
+            )
+        return {
+            "upload": upload,
+            "completed": completed,
+            "media": processed,
+            "media_uuid": media_uuid,
+        }
 
     def unpublish(self, publication):
         if self.dry_run:
@@ -154,6 +174,23 @@ class FanvueAdapter(PublisherAdapter):
         metadata = getattr(artifact, "generated_metadata", None) or {}
         value = str(metadata.get("fanvue_media_path") or getattr(artifact, "media_path", "") or "")
         return Path(value).expanduser() if value else None
+
+    def media(self, draft):
+        artifact = getattr(draft, "artifact", None)
+        metadata = getattr(artifact, "generated_metadata", None) or {}
+        if not metadata.get("additional_media"):
+            path = self.media_path(draft)
+            content_type = str(getattr(artifact, "media_content_type", "") or "")
+            return [(path, "video" if content_type.startswith("video/") else "image")] if path else []
+        media = []
+        for item in post_media_items(draft):
+            kind = media_kind(item)
+            if kind not in {"image", "video"}:
+                continue
+            media.append(
+                (Path(str(item.get("media_path") or "")).expanduser(), kind)
+            )
+        return media[:10]
 
     def parse_time(self, value):
         try:

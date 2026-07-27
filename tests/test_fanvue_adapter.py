@@ -49,6 +49,25 @@ class FanvueAdapterTest(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual("post-1", result.external_post_id)
 
+    def test_dry_run_includes_multiple_photos_and_videos(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first = Path(directory) / "first.jpg"
+            second = Path(directory) / "second.jpg"
+            video = Path(directory) / "motion.mp4"
+            for path in (first, second, video):
+                path.write_bytes(b"media")
+            draft = self.draft(first)
+            draft.artifact.media_content_type = "image/jpeg"
+            draft.artifact.generated_metadata = {
+                "additional_media": [
+                    {"media_path": str(second), "media_content_type": "image/jpeg"},
+                    {"media_path": str(video), "media_content_type": "video/mp4"},
+                ]
+            }
+            result = FanvueAdapter(oauth=FakeOAuth(), dry_run=True).publish(draft)
+        self.assertTrue(result.success)
+        self.assertEqual(3, len(result.raw_response["media_paths"]))
+
     def test_maps_metrics_and_comments(self):
         publication = SimpleNamespace(external_post_id="post-1", external_url="url")
         adapter = FanvueAdapter(oauth=FakeOAuth(), dry_run=False)

@@ -160,7 +160,7 @@
   <body>
     <main class="shell">
       <nav class="topbar" aria-label="Creator OS navigation">
-        <a class="back" href="{{ url_for('creator.index') }}" aria-label="Back to Creator OS">← Creator OS</a>
+        <div><a class="back" href="{{ url_for('creator.index') }}" aria-label="Back to Creator OS">← Creator OS</a> · <a class="back" href="{{ url_for('creator.manage_engagement') }}">Manage Engagement</a></div>
         {% if session.get('creator_user') %}<a class="sign-out" href="{{ url_for('creator.google_logout') }}">Sign out {{ session['creator_user'].get('name') or session['creator_user']['email'] }}</a>{% endif %}
       </nav>
 

@@ -3,7 +3,9 @@ from io import BytesIO
 from pathlib import Path
 import subprocess
 import sys
+from threading import Thread
 from zipfile import ZIP_DEFLATED, ZipFile
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -14,6 +16,7 @@ from sqlalchemy import String, cast, or_
 from .db import get_session
 from .models import (
     ContentMetricSnapshot,
+    EngagementSenderPolicy,
     Artifact,
     CanonEntry,
     MetricsPollRun,
@@ -26,6 +29,7 @@ from .models import (
 )
 from .publishers import FacebookAdapter, InstagramAdapter, ThreadsAdapter, XAdapter, FanvueAdapter
 from .services.canon_importer import CanonImporter
+from .services.custom_post_curator import CUSTOM_POST_PLATFORMS, CustomPostCurator
 from .services.analytics_accounts import synchronize_account_registry
 from .services.account_analytics_runner import AccountAnalyticsRunner
 from .services.draft_generator import ArtifactDraftGenerator, PLATFORMS
@@ -36,6 +40,7 @@ from .services.fanvue_oauth import FanvueOAuth
 from .services.media_analyzer import MediaAnalyzer
 from .services.metadata_generator import ArtifactMetadataGenerator
 from .services.post_metrics import PostMetricsPoller, latest_snapshot_by_publication
+from .services.post_media import artifact_media_items
 from .services.post_preview import apply_review_form, platform_summary
 from .services.sample_artifact_importer import SampleArtifactImporter
 from .services.s3_media_storage import S3MediaStorage
@@ -47,6 +52,15 @@ from .services.youtube_oauth import YouTubeOAuth
 from .services.uploads import archive_media_filename, next_fragment_code, save_artifact_file
 
 bp = Blueprint("creator", __name__)
+EASTERN_TIME = ZoneInfo("America/New_York")
+
+
+def eastern_time(value):
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(EASTERN_TIME)
 
 DAILY_POST_FAMILIES = {
     "reconstruction": ("Recovered fragment", "recovered-fragment", "Recovered Fragment"),
@@ -389,7 +403,7 @@ def instagram_adapter():
 
 
 def refresh_meta_media_url(draft):
-    """Refresh expiring S3 media URLs before a saved draft is retried."""
+    """Store or refresh public S3 media URLs before a Meta publish attempt."""
     artifact = draft.artifact
     metadata = dict((artifact.generated_metadata or {}) or {})
     object_key = str(metadata.get("s3_object_key") or "").strip()
@@ -406,12 +420,20 @@ def refresh_meta_media_url(draft):
         prefix=current_app.config.get("S3_MEDIA_PREFIX"),
         presign_seconds=current_app.config.get("S3_PRESIGN_SECONDS"),
     )
-    if object_key:
+    needs_image_normalization = content_type.startswith("image/") and not metadata.get(
+        "meta_feed_geometry_normalized"
+    )
+    if object_key and not (needs_image_normalization and media_path.is_file()):
         refreshed_url = storage.refresh_signed_url(object_key)
-    elif content_type.startswith("image/"):
-        stored = storage.store_instagram_image(
+        if object_key.lower().endswith((".jpg", ".jpeg")):
+            metadata["public_media_content_type"] = "image/jpeg"
+        elif content_type.startswith("video/"):
+            metadata["public_media_content_type"] = content_type
+    elif content_type.startswith(("image/", "video/")):
+        stored = storage.store_social_media(
             media_path,
             artifact.title,
+            content_type,
             local_day=(artifact.created_at or datetime.now(timezone.utc)).date(),
             output_dir=current_app.config.get("UPLOAD_FOLDER"),
         )
@@ -419,12 +441,59 @@ def refresh_meta_media_url(draft):
         refreshed_url = stored.signed_url
         metadata["s3_bucket"] = current_app.config.get("S3_MEDIA_BUCKET")
         metadata["s3_object_key"] = object_key
+        metadata["public_media_content_type"] = stored.content_type
+        if stored.content_type == "image/jpeg":
+            metadata["meta_feed_geometry_normalized"] = True
     else:
         return existing_url
 
     metadata["public_media_url"] = refreshed_url
     artifact.generated_metadata = metadata
     return refreshed_url
+
+
+def refresh_custom_media_urls(draft):
+    artifact = draft.artifact
+    metadata = dict(artifact.generated_metadata or {})
+    additional = [dict(item) for item in metadata.get("additional_media") or []]
+    storage = S3MediaStorage(
+        bucket=current_app.config.get("S3_MEDIA_BUCKET"),
+        region=current_app.config.get("S3_MEDIA_REGION"),
+        prefix=current_app.config.get("S3_MEDIA_PREFIX"),
+        presign_seconds=current_app.config.get("S3_PRESIGN_SECONDS"),
+    )
+    items = artifact_media_items(artifact)
+    refreshed_items = []
+    for index, item in enumerate(items):
+        object_key = str(item.get("s3_object_key") or "")
+        if object_key:
+            item["public_media_url"] = storage.refresh_signed_url(object_key)
+        else:
+            stored = storage.store_social_media(
+                item["media_path"],
+                f"{artifact.title}-{index + 1}",
+                item.get("media_content_type"),
+                local_day=(artifact.created_at or datetime.now(timezone.utc)).date(),
+                output_dir=current_app.config.get("UPLOAD_FOLDER"),
+            )
+            item.update(
+                {
+                    "media_path": str(stored.local_path.resolve()),
+                    "media_content_type": stored.content_type,
+                    "s3_object_key": stored.object_key,
+                    "public_media_url": stored.signed_url,
+                }
+            )
+        refreshed_items.append(item)
+
+    primary = refreshed_items[0]
+    artifact.media_path = primary["media_path"]
+    artifact.media_content_type = primary["media_content_type"]
+    metadata["s3_object_key"] = primary["s3_object_key"]
+    metadata["public_media_url"] = primary["public_media_url"]
+    metadata["additional_media"] = [dict(item) for item in refreshed_items[1:]]
+    artifact.generated_metadata = metadata
+    return refreshed_items
 
 
 def x_adapter():
@@ -544,6 +613,358 @@ def index():
     )
 
 
+@bp.get("/custom-posts/new")
+def new_custom_post():
+    return render_template("custom_post_new.html")
+
+
+@bp.post("/custom-posts")
+def create_custom_post():
+    uploads = [
+        upload
+        for upload in request.files.getlist("media")
+        if upload and upload.filename
+    ]
+    if not uploads:
+        legacy_image = request.files.get("image")
+        if legacy_image and legacy_image.filename:
+            uploads = [legacy_image]
+    source_text = request.form.get("source_text", "").strip()
+    invalid = [
+        upload.filename
+        for upload in uploads
+        if not str(upload.mimetype or "").startswith(("image/", "video/"))
+    ]
+    if not uploads or invalid:
+        flash("Choose one or more photo or video files for the post.", "error")
+        return render_template(
+            "custom_post_new.html",
+            source_text=source_text,
+            title=request.form.get("title", ""),
+            tags=request.form.get("tags", ""),
+        ), 400
+    if len(uploads) > 10:
+        flash("A custom post can contain at most 10 photos and videos.", "error")
+        return render_template(
+            "custom_post_new.html",
+            source_text=source_text,
+            title=request.form.get("title", ""),
+            tags=request.form.get("tags", ""),
+        ), 400
+    if not source_text:
+        flash("Enter the core text you want Creator OS to curate.", "error")
+        return render_template(
+            "custom_post_new.html",
+            source_text=source_text,
+            title=request.form.get("title", ""),
+            tags=request.form.get("tags", ""),
+        ), 400
+
+    session = get_session()
+    saved_media = [
+        save_artifact_file(upload, current_app.config["UPLOAD_FOLDER"])
+        for upload in uploads
+    ]
+    upload_info = saved_media[0]
+    title = request.form.get("title", "").strip() or custom_post_title(source_text)
+    tags = split_tags(request.form.get("tags", ""))
+    artifact = Artifact(
+        title=title,
+        artifact_type="image",
+        summary=source_text,
+        lore_text="",
+        visibility="private",
+        canonical_status="draft",
+        content_tags=tags,
+        mood_tags=[],
+        source_notes="Creator-supplied custom social post.",
+        generated_metadata={
+            "workflow": "custom_post_v1",
+            "source_text": source_text,
+            "curation": "platform length and hashtag adaptation; creator review required",
+            "additional_media": saved_media[1:],
+        },
+        **upload_info,
+    )
+    session.add(artifact)
+    session.flush()
+    for draft_data in CustomPostCurator(source_text, tags).curate():
+        session.add(PostDraft(artifact_id=artifact.id, **draft_data))
+    session.commit()
+    flash("Five platform drafts were curated. Review them before publishing.", "success")
+    return redirect(url_for("creator.review_custom_post", artifact_id=artifact.id))
+
+
+@bp.get("/custom-posts/<int:artifact_id>")
+def review_custom_post(artifact_id):
+    session = get_session()
+    artifact = session.get(Artifact, artifact_id)
+    if not artifact or (artifact.generated_metadata or {}).get("workflow") != "custom_post_v1":
+        flash("Custom post not found.", "error")
+        return redirect(url_for("creator.index"))
+    drafts = {
+        draft.platform: draft
+        for draft in artifact.post_drafts
+        if draft.platform in CUSTOM_POST_PLATFORMS and not draft.archived
+    }
+    return render_template(
+        "custom_post_review.html",
+        artifact=artifact,
+        drafts=drafts,
+        platforms=CUSTOM_POST_PLATFORMS,
+        media_items=artifact_media_items(artifact),
+    )
+
+
+@bp.get("/custom-posts/<int:artifact_id>/media")
+@bp.get("/custom-posts/<int:artifact_id>/media/<int:item_index>")
+def custom_post_media(artifact_id, item_index=0):
+    artifact = get_session().get(Artifact, artifact_id)
+    if not artifact or (artifact.generated_metadata or {}).get("workflow") != "custom_post_v1":
+        abort(404)
+    items = artifact_media_items(artifact)
+    if item_index < 0 or item_index >= len(items):
+        abort(404)
+    item = items[item_index]
+    path = Path(str(item.get("media_path") or ""))
+    if not path.is_file():
+        abort(404)
+    return send_file(
+        path,
+        mimetype=item.get("media_content_type") or "application/octet-stream",
+    )
+
+
+@bp.post("/custom-posts/<int:artifact_id>/save")
+def save_custom_post(artifact_id):
+    session = get_session()
+    artifact = session.get(Artifact, artifact_id)
+    if not artifact or (artifact.generated_metadata or {}).get("workflow") != "custom_post_v1":
+        flash("Custom post not found.", "error")
+        return redirect(url_for("creator.index"))
+    update_custom_post_drafts(artifact, request.form)
+    session.commit()
+    flash("Platform drafts saved.", "success")
+    return redirect(url_for("creator.review_custom_post", artifact_id=artifact.id))
+
+
+@bp.post("/custom-posts/<int:artifact_id>/publish")
+def publish_custom_post(artifact_id):
+    session = get_session()
+    artifact = session.get(Artifact, artifact_id)
+    if not artifact or (artifact.generated_metadata or {}).get("workflow") != "custom_post_v1":
+        flash("Custom post not found.", "error")
+        return redirect(url_for("creator.index"))
+
+    existing_job = dict((artifact.generated_metadata or {}).get("custom_publish_job") or {})
+    if existing_job.get("status") in {"queued", "running"}:
+        flash("This post already has a publication job in progress.", "error")
+        return redirect(url_for("creator.review_custom_post", artifact_id=artifact.id))
+
+    update_custom_post_drafts(artifact, request.form)
+    selected = {
+        platform
+        for platform in request.form.getlist("platforms")
+        if platform in CUSTOM_POST_PLATFORMS
+    }
+    if not selected:
+        flash("Choose at least one platform to publish.", "error")
+        return redirect(url_for("creator.review_custom_post", artifact_id=artifact.id))
+
+    saved_artifact_id = artifact.id
+    start_custom_post_publish_job(artifact, selected)
+    flash(
+        "Publishing started in the background. Refresh this page for platform progress.",
+        "success",
+    )
+    return redirect(url_for("creator.review_custom_post", artifact_id=saved_artifact_id))
+
+
+def start_custom_post_publish_job(artifact, selected):
+    metadata = dict(artifact.generated_metadata or {})
+    existing_job = dict(metadata.get("custom_publish_job") or {})
+    if existing_job.get("status") in {"queued", "running"}:
+        return False
+    metadata["custom_publish_job"] = {
+        "status": "queued",
+        "platforms": sorted(selected),
+        "queued_at": datetime.now(timezone.utc).isoformat(),
+        "results": {},
+    }
+    artifact.generated_metadata = metadata
+    get_session().commit()
+
+    app = current_app._get_current_object()
+    artifact_id = artifact.id
+    if current_app.config.get("CUSTOM_POST_PUBLISH_SYNC"):
+        run_custom_post_publish(app, artifact_id, selected)
+    else:
+        Thread(
+            target=run_custom_post_publish,
+            args=(app, artifact_id, selected),
+            name=f"post-{artifact_id}-publisher",
+            daemon=True,
+        ).start()
+    return True
+
+
+def flash_individual_publish_status(draft_id, label):
+    session = get_session()
+    if current_app.config.get("CUSTOM_POST_PUBLISH_SYNC"):
+        session.expire_all()
+        saved = session.get(PostDraft, draft_id)
+        latest = max(saved.publications, key=lambda publication: publication.id, default=None)
+        flash(
+            f"{label} {saved.status}."
+            if saved.status == "published"
+            else ((latest.error_message if latest else "") or f"{label} publish failed."),
+            "success" if saved.status == "published" else "error",
+        )
+    else:
+        flash(
+            f"{label} publishing started in the background. Refresh for status.",
+            "success",
+        )
+
+
+def run_custom_post_publish(app, artifact_id, selected):
+    with app.app_context():
+        session = get_session()
+        artifact = session.get(Artifact, artifact_id)
+        if not artifact:
+            return
+        metadata = dict(artifact.generated_metadata or {})
+        job = dict(metadata.get("custom_publish_job") or {})
+        job.update(
+            {
+                "status": "running",
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "results": dict(job.get("results") or {}),
+            }
+        )
+        metadata["custom_publish_job"] = job
+        artifact.generated_metadata = metadata
+        session.commit()
+
+        adapters = {
+            "facebook": facebook_adapter,
+            "instagram": instagram_adapter,
+            "threads": threads_adapter,
+            "x": x_adapter,
+            "fanvue": fanvue_adapter,
+        }
+        drafts = {draft.platform: draft for draft in artifact.post_drafts}
+        failed = False
+        for platform in CUSTOM_POST_PLATFORMS:
+            if platform not in selected:
+                continue
+            draft = drafts.get(platform)
+            if draft is None:
+                update_custom_publish_progress(
+                    artifact,
+                    platform,
+                    "failed",
+                    "Platform draft is missing.",
+                )
+                session.commit()
+                failed = True
+                continue
+            if any(
+                publication.status == "published" and publication.external_post_id
+                for publication in draft.publications
+            ):
+                update_custom_publish_progress(artifact, platform, "skipped", "Already published.")
+                session.commit()
+                continue
+            try:
+                if platform in ("instagram", "threads"):
+                    if len(artifact_media_items(artifact)) > 1:
+                        refresh_custom_media_urls(draft)
+                    else:
+                        refresh_meta_media_url(draft)
+                result = adapters[platform]().publish(draft)
+            except Exception as error:
+                result = None
+                message = f"{type(error).__name__}: {error}"
+                draft.status = "failed"
+                update_custom_publish_progress(artifact, platform, "failed", message)
+                session.commit()
+                failed = True
+                continue
+
+            draft.status = result.status
+            draft.updated_at = datetime.now(timezone.utc)
+            if result.success:
+                draft.approved_at = datetime.now(timezone.utc)
+            else:
+                failed = True
+            session.add(
+                PostPublication(
+                    post_draft=draft,
+                    platform=platform,
+                    status=result.status,
+                    external_post_id=result.external_post_id,
+                    external_url=result.external_url,
+                    error_message=result.error_message,
+                    raw_response=result.raw_response,
+                )
+            )
+            update_custom_publish_progress(
+                artifact,
+                platform,
+                result.status,
+                result.error_message,
+                result.external_url,
+            )
+            session.commit()
+
+        metadata = dict(artifact.generated_metadata or {})
+        job = dict(metadata.get("custom_publish_job") or {})
+        job["status"] = "partial" if failed else "completed"
+        job["completed_at"] = datetime.now(timezone.utc).isoformat()
+        metadata["custom_publish_job"] = job
+        artifact.generated_metadata = metadata
+        session.commit()
+
+
+def update_custom_publish_progress(artifact, platform, status, message="", external_url=""):
+    metadata = dict(artifact.generated_metadata or {})
+    job = dict(metadata.get("custom_publish_job") or {})
+    results = dict(job.get("results") or {})
+    results[platform] = {
+        "status": status,
+        "message": str(message or ""),
+        "external_url": str(external_url or ""),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    job["results"] = results
+    metadata["custom_publish_job"] = job
+    artifact.generated_metadata = metadata
+
+
+def update_custom_post_drafts(artifact, form):
+    for draft in artifact.post_drafts:
+        if draft.platform not in CUSTOM_POST_PLATFORMS:
+            continue
+        draft.caption = form.get(f"caption_{draft.platform}", draft.caption).strip()
+        draft.hashtags = split_tags(form.get(f"hashtags_{draft.platform}", ""))
+        draft.call_to_action = form.get(
+            f"call_to_action_{draft.platform}",
+            draft.call_to_action,
+        ).strip()
+        if draft.status != "published":
+            draft.status = "draft"
+        draft.updated_at = datetime.now(timezone.utc)
+
+
+def custom_post_title(source_text):
+    first_line = next((line.strip() for line in source_text.splitlines() if line.strip()), "")
+    first_sentence = first_line.split(".", 1)[0].strip()
+    if len(first_sentence) > 80:
+        first_sentence = first_sentence[:77].rstrip() + "..."
+    return first_sentence or "Custom post"
+
+
 @bp.post("/daily-fragments/generate")
 def generate_daily_fragment():
     family = request.form.get("family", "").strip().lower()
@@ -650,6 +1071,43 @@ def unpublish_daily_fragment(artifact_id):
         flash("The live platform posts were removed. This Creator OS post is ready to edit and republish.", "success")
     else:
         flash("This post was already unpublished and is ready to edit.", "success")
+    return redirect(url_for("creator.edit_daily_fragment", artifact_id=artifact.id))
+
+
+@bp.post(
+    "/daily-fragments/<int:artifact_id>/publications/<int:publication_id>/confirm-unpublished"
+)
+def confirm_publication_unpublished(artifact_id, publication_id):
+    """Reconcile a platform post that the user has already removed manually."""
+    session = get_session()
+    artifact = daily_fragment_or_404(session, artifact_id)
+    publication = session.get(PostPublication, publication_id)
+    if publication is None or publication.post_draft.artifact_id != artifact.id:
+        abort(404)
+
+    if publication.status == "published" and publication.external_post_id:
+        now = datetime.now(timezone.utc)
+        publication.status = "unpublished"
+        publication.error_message = ""
+        publication.raw_response = {
+            **dict(publication.raw_response or {}),
+            "manual_unpublish": {
+                "confirmed_at": now.isoformat(),
+                "reason": "User confirmed the platform post was deleted manually.",
+            },
+            "unpublished_at": now.isoformat(),
+        }
+        publication.post_draft.status = "approved"
+        publication.post_draft.updated_at = now
+        session.commit()
+        flash(
+            f"{publication.platform.title()} was recorded as manually deleted. "
+            "Creator can now edit and republish once no other platforms remain live.",
+            "success",
+        )
+    else:
+        flash(f"{publication.platform.title()} was already recorded as unpublished.", "success")
+
     return redirect(url_for("creator.edit_daily_fragment", artifact_id=artifact.id))
 
 
@@ -797,47 +1255,18 @@ def publish_draft_from_library(draft_id):
         flash(f"{draft.platform.title()} was already published; no duplicate was created.", "success")
         return redirect(url_for("creator.index"))
 
-    adapters = {
-        "facebook": facebook_adapter,
-        "instagram": instagram_adapter,
-        "threads": threads_adapter,
-        "x": x_adapter,
-        "fanvue": fanvue_adapter,
-    }
-    adapter_factory = adapters.get(draft.platform)
-    if adapter_factory is None:
+    if draft.platform not in CUSTOM_POST_PLATFORMS:
         flash(f"Automatic publishing is not configured for {draft.platform.title()}.", "error")
         return redirect(url_for("creator.index"))
 
-    if draft.platform in {"instagram", "threads"}:
-        try:
-            refresh_meta_media_url(draft)
-        except (OSError, ValueError) as error:
-            flash(f"{draft.platform.title()} media refresh failed: {error}", "error")
-            return redirect(url_for("creator.index"))
-
     draft.updated_at = datetime.now(timezone.utc)
-    result = adapter_factory().publish(draft)
-    draft.status = result.status
-    if result.success:
-        draft.approved_at = datetime.now(timezone.utc)
-    session.add(
-        PostPublication(
-            post_draft_id=draft.id,
-            platform=draft.platform,
-            status=result.status,
-            external_post_id=result.external_post_id,
-            external_url=result.external_url,
-            error_message=result.error_message,
-            raw_response=result.raw_response,
-        )
-    )
     session.commit()
     label = "FanVue" if draft.platform == "fanvue" else draft.platform.title()
-    flash(
-        f"{label} {result.status}." if result.success else (result.error_message or f"{label} publish failed."),
-        "success" if result.success else "error",
-    )
+    saved_draft_id = draft.id
+    if not start_custom_post_publish_job(draft.artifact, {draft.platform}):
+        flash("This post already has a publication job in progress.", "error")
+        return redirect(url_for("creator.index"))
+    flash_individual_publish_status(saved_draft_id, label)
     return redirect(url_for("creator.index"))
 
 
@@ -1228,7 +1657,8 @@ def metrics_dashboard():
             for row in active_rows
         ),
         "pendingInteractions": sum(
-            row["replyStatus"] == "pending_review" for row in interaction_rows
+            row["replyStatus"] in ("pending_review", "needs_review", "drafted")
+            for row in interaction_rows
         ),
         "lastFetched": max(
             (row["fetchedAt"] for row in publication_rows if row["fetchedAt"]),
@@ -1247,6 +1677,257 @@ def metrics_dashboard():
         summary=summary,
         latest_poll=latest_poll,
     )
+
+
+def engagement_sender_policy(session, interaction, create=False):
+    if not interaction.author_platform_id:
+        return None
+    policy = (
+        session.query(EngagementSenderPolicy)
+        .filter(EngagementSenderPolicy.platform == interaction.platform)
+        .filter(EngagementSenderPolicy.author_platform_id == interaction.author_platform_id)
+        .one_or_none()
+    )
+    if policy is None and create:
+        policy = EngagementSenderPolicy(
+            platform=interaction.platform,
+            author_platform_id=interaction.author_platform_id,
+            author_name=interaction.author_name,
+        )
+        session.add(policy)
+    return policy
+
+
+@bp.get("/engagement")
+def manage_engagement():
+    session = get_session()
+    supported_platforms = ("facebook", "instagram", "threads")
+    latest_engagement_poll = (
+        session.query(MetricsPollRun)
+        .filter(MetricsPollRun.source == "fan-comment-scheduler")
+        .order_by(MetricsPollRun.started_at.desc())
+        .first()
+    )
+    latest_engagement_poll_time = eastern_time(
+        latest_engagement_poll.completed_at if latest_engagement_poll else None
+    )
+    status_filter = str(request.args.get("status") or "open").strip().lower()
+    platform_filter = str(request.args.get("platform") or "all").strip().lower()
+    if platform_filter not in (*supported_platforms, "all"):
+        platform_filter = "all"
+    query = (
+        session.query(PostInteraction)
+        .filter(PostInteraction.platform.in_(supported_platforms))
+        .filter(PostInteraction.interaction_type.in_(("comment", "reply")))
+        .order_by(PostInteraction.received_at.desc(), PostInteraction.id.desc())
+    )
+    if platform_filter != "all":
+        query = query.filter(PostInteraction.platform == platform_filter)
+    if status_filter == "open":
+        query = query.filter(PostInteraction.reply_status.in_(("pending_review", "needs_review", "drafted", "error")))
+    elif status_filter == "sent":
+        query = query.filter(PostInteraction.reply_status == "sent")
+    elif status_filter == "blocked":
+        query = query.filter(PostInteraction.reply_status == "sender_blocked")
+    interactions = query.limit(500).all()
+
+    engagement_records = (
+        session.query(
+            PostInteraction.external_id,
+            PostInteraction.external_post_id,
+            PostInteraction.post_publication_id,
+            PostInteraction.author_platform_id,
+            PostInteraction.author_name,
+        )
+        .filter(PostInteraction.platform.in_(supported_platforms))
+        .filter(PostInteraction.interaction_type.in_(("comment", "reply")))
+        .filter(PostInteraction.platform == platform_filter if platform_filter != "all" else True)
+        .all()
+    )
+    post_keys = {
+        str(external_post_id or "").strip() or f"publication:{publication_id}"
+        for _, external_post_id, publication_id, _, _ in engagement_records
+        if str(external_post_id or "").strip() or publication_id
+    }
+    sender_keys = {
+        str(author_platform_id or "").strip()
+        or (f"name:{str(author_name).strip().casefold()}" if str(author_name or "").strip() else f"comment:{external_id}")
+        for external_id, _, _, author_platform_id, author_name in engagement_records
+    }
+    engagement_totals = {
+        "posts": len(post_keys),
+        "senders": len(sender_keys),
+        "comments": len(engagement_records),
+    }
+
+    policies = {
+        (policy.platform, policy.author_platform_id): policy
+        for policy in session.query(EngagementSenderPolicy).all()
+    }
+    rows = []
+    for interaction in interactions:
+        policy = policies.get((interaction.platform, interaction.author_platform_id))
+        metadata = dict(interaction.raw_payload or {})
+        rows.append({
+            "interaction": interaction,
+            "policy": policy,
+            "post_title": (
+                interaction.post_publication.post_draft.artifact.title
+                if interaction.post_publication
+                else (str(metadata.get("source_post_message") or "").strip()[:120] or "Facebook Page post")
+            ),
+            "post_url": (
+                interaction.post_publication.external_url
+                if interaction.post_publication else str(metadata.get("source_post_permalink") or "")
+            ),
+            "reply_language": metadata.get("reply_language") or "",
+            "reply_reason": metadata.get("reply_reason") or "",
+            "reply_external_id": metadata.get("reply_external_id") or "",
+            "received_at_eastern": eastern_time(interaction.received_at),
+        })
+    counts = {
+        "open": session.query(PostInteraction).filter(
+            PostInteraction.platform.in_(supported_platforms),
+            PostInteraction.platform == platform_filter if platform_filter != "all" else True,
+            PostInteraction.reply_status.in_(("pending_review", "needs_review", "drafted", "error")),
+        ).count(),
+        "sent": session.query(PostInteraction).filter(
+            PostInteraction.platform.in_(supported_platforms),
+            PostInteraction.platform == platform_filter if platform_filter != "all" else True,
+            PostInteraction.reply_status == "sent"
+        ).count(),
+        "blocked": session.query(PostInteraction).filter(
+            PostInteraction.platform.in_(supported_platforms),
+            PostInteraction.platform == platform_filter if platform_filter != "all" else True,
+            PostInteraction.reply_status == "sender_blocked"
+        ).count(),
+        "whitelisted": session.query(EngagementSenderPolicy).filter(
+            EngagementSenderPolicy.platform.in_(supported_platforms),
+            EngagementSenderPolicy.platform == platform_filter if platform_filter != "all" else True,
+            EngagementSenderPolicy.auto_approve.is_(True)
+        ).count(),
+    }
+    return render_template(
+        "manage_engagement.html",
+        rows=rows,
+        counts=counts,
+        status_filter=status_filter,
+        latest_engagement_poll=latest_engagement_poll,
+        latest_engagement_poll_time=latest_engagement_poll_time,
+        engagement_totals=engagement_totals,
+        platform_filter=platform_filter,
+        supported_platforms=supported_platforms,
+    )
+
+
+@bp.post("/engagement/<int:interaction_id>/save")
+def save_engagement_reply(interaction_id):
+    session = get_session()
+    interaction = session.get(PostInteraction, interaction_id)
+    if not interaction or interaction.platform not in ("facebook", "instagram", "threads"):
+        abort(404)
+    if interaction.reply_status in ("sent", "sender_blocked"):
+        flash("That interaction can no longer be edited.", "error")
+        return redirect(url_for("creator.manage_engagement"))
+    interaction.suggested_reply = str(request.form.get("reply") or "").strip()
+    interaction.reply_status = "drafted" if interaction.suggested_reply else "needs_review"
+    session.commit()
+    flash("Proposed reply saved.", "success")
+    return redirect(url_for("creator.manage_engagement", status=request.form.get("status_filter", "open")))
+
+
+@bp.post("/engagement/<int:interaction_id>/publish")
+def publish_engagement_reply(interaction_id):
+    session = get_session()
+    interaction = session.get(PostInteraction, interaction_id)
+    if not interaction or interaction.platform not in ("facebook", "instagram", "threads"):
+        abort(404)
+    if interaction.reply_status == "sent":
+        flash("That reply has already been published.", "error")
+        return redirect(url_for("creator.manage_engagement"))
+    policy = engagement_sender_policy(session, interaction)
+    if policy and policy.blocked:
+        flash("Replies cannot be published to a blocked sender.", "error")
+        return redirect(url_for("creator.manage_engagement"))
+    reply = str(request.form.get("reply") or interaction.suggested_reply or "").strip()
+    if not reply:
+        flash("Write a reply before publishing.", "error")
+        return redirect(url_for("creator.manage_engagement"))
+    try:
+        if interaction.platform == "facebook":
+            payload = facebook_adapter().reply_to_comment(interaction.external_id, reply)
+        elif interaction.platform == "instagram":
+            payload = instagram_adapter().reply_to_comment(interaction.external_id, reply)
+        else:
+            payload = threads_adapter().reply_to_reply(interaction.external_id, reply)
+    except (requests.RequestException, ValueError) as error:
+        interaction.suggested_reply = reply
+        interaction.reply_status = "error"
+        session.commit()
+        flash(f"{interaction.platform.title()} reply failed: {error}", "error")
+        return redirect(url_for("creator.manage_engagement"))
+    metadata = dict(interaction.raw_payload or {})
+    metadata["reply_external_id"] = str(payload.get("id") or "")
+    metadata["reply_published_manually"] = True
+    interaction.raw_payload = metadata
+    interaction.suggested_reply = reply
+    interaction.reply_status = "sent"
+    interaction.status = "replied"
+    session.commit()
+    flash(f"Reply published to {interaction.platform.title()}.", "success")
+    return redirect(url_for("creator.manage_engagement", status="sent", platform=request.form.get("platform_filter", "all")))
+
+
+@bp.post("/engagement/<int:interaction_id>/whitelist")
+def whitelist_engagement_sender(interaction_id):
+    session = get_session()
+    interaction = session.get(PostInteraction, interaction_id)
+    if not interaction or interaction.platform not in ("facebook", "instagram", "threads"):
+        abort(404)
+    policy = engagement_sender_policy(session, interaction, create=True)
+    if policy is None:
+        flash("This comment does not include a sender ID, so it cannot be whitelisted.", "error")
+        return redirect(url_for("creator.manage_engagement"))
+    enable = str(request.form.get("enable") or "true").lower() == "true"
+    policy.auto_approve = enable
+    if enable:
+        policy.blocked = False
+    policy.author_name = interaction.author_name or policy.author_name
+    policy.updated_at = datetime.now(timezone.utc)
+    session.commit()
+    flash(f"{interaction.author_name or 'Sender'} {'added to' if enable else 'removed from'} automatic approval.", "success")
+    return redirect(url_for("creator.manage_engagement", status=request.form.get("status_filter", "open"), platform=request.form.get("platform_filter", "all")))
+
+
+@bp.post("/engagement/<int:interaction_id>/block")
+def block_engagement_sender(interaction_id):
+    session = get_session()
+    interaction = session.get(PostInteraction, interaction_id)
+    if not interaction or interaction.platform != "facebook":
+        abort(404)
+    if not interaction.author_platform_id:
+        flash("Facebook did not provide a sender ID for this comment.", "error")
+        return redirect(url_for("creator.manage_engagement"))
+    try:
+        facebook_adapter().block_sender(interaction.author_platform_id)
+    except (requests.RequestException, ValueError) as error:
+        flash(f"Facebook did not block this sender: {error}", "error")
+        return redirect(url_for("creator.manage_engagement"))
+    policy = engagement_sender_policy(session, interaction, create=True)
+    policy.blocked = True
+    policy.auto_approve = False
+    policy.author_name = interaction.author_name or policy.author_name
+    policy.updated_at = datetime.now(timezone.utc)
+    (
+        session.query(PostInteraction)
+        .filter(PostInteraction.platform == interaction.platform)
+        .filter(PostInteraction.author_platform_id == interaction.author_platform_id)
+        .filter(PostInteraction.reply_status != "sent")
+        .update({PostInteraction.reply_status: "sender_blocked"}, synchronize_session=False)
+    )
+    session.commit()
+    flash(f"{interaction.author_name or 'Sender'} was blocked from the Facebook Page.", "success")
+    return redirect(url_for("creator.manage_engagement", status="blocked"))
 
 
 @bp.post("/metrics/poll")
@@ -1373,32 +2054,13 @@ def publish_instagram(draft_id):
 
     apply_review_form(draft, request.form)
     draft.updated_at = datetime.now(timezone.utc)
-    try:
-        refresh_meta_media_url(draft)
-    except (OSError, ValueError) as error:
-        flash(f"Instagram media refresh failed: {error}", "error")
-        return redirect(url_for("creator.review_draft", draft_id=draft.id))
-    result = instagram_adapter().publish(draft)
-    draft.status = result.status
-    if result.success:
-        draft.approved_at = datetime.now(timezone.utc)
-    session.add(
-        PostPublication(
-            post_draft_id=draft.id,
-            platform="instagram",
-            status=result.status,
-            external_post_id=result.external_post_id,
-            external_url=result.external_url,
-            error_message=result.error_message,
-            raw_response=result.raw_response,
-        )
-    )
     session.commit()
-    if result.success:
-        flash(f"Instagram {result.status}.", "success")
-    else:
-        flash(result.error_message or "Instagram publish failed.", "error")
-    return redirect(url_for("creator.review_draft", draft_id=draft.id))
+    saved_draft_id = draft.id
+    if not start_custom_post_publish_job(draft.artifact, {"instagram"}):
+        flash("This post already has a publication job in progress.", "error")
+        return redirect(url_for("creator.review_draft", draft_id=draft.id))
+    flash_individual_publish_status(saved_draft_id, "Instagram")
+    return redirect(url_for("creator.review_draft", draft_id=saved_draft_id))
 
 
 @bp.post("/drafts/<int:draft_id>/publish/x")
@@ -1432,24 +2094,13 @@ def publish_threads(draft_id):
         return redirect(url_for("creator.index"))
     apply_review_form(draft, request.form)
     draft.updated_at = datetime.now(timezone.utc)
-    try:
-        refresh_meta_media_url(draft)
-    except (OSError, ValueError) as error:
-        flash(f"Threads media refresh failed: {error}", "error")
-        return redirect(url_for("creator.review_draft", draft_id=draft.id))
-    result = threads_adapter().publish(draft)
-    draft.status = result.status
-    if result.success:
-        draft.approved_at = datetime.now(timezone.utc)
-    session.add(PostPublication(
-        post_draft_id=draft.id, platform="threads", status=result.status,
-        external_post_id=result.external_post_id, external_url=result.external_url,
-        error_message=result.error_message, raw_response=result.raw_response,
-    ))
     session.commit()
-    flash(f"Threads {result.status}." if result.success else (result.error_message or "Threads publish failed."),
-          "success" if result.success else "error")
-    return redirect(url_for("creator.review_draft", draft_id=draft.id))
+    saved_draft_id = draft.id
+    if not start_custom_post_publish_job(draft.artifact, {"threads"}):
+        flash("This post already has a publication job in progress.", "error")
+        return redirect(url_for("creator.review_draft", draft_id=draft.id))
+    flash_individual_publish_status(saved_draft_id, "Threads")
+    return redirect(url_for("creator.review_draft", draft_id=saved_draft_id))
 
 
 @bp.post("/drafts/<int:draft_id>/publish/fanvue")
