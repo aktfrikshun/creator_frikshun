@@ -133,6 +133,116 @@ LANE_KEYWORDS = {
     ),
 }
 
+QUESTIONS_FROM_THE_ECHO_TOPICS = (
+    {
+        "key": "parallel-selves",
+        "question": "If every choice creates another version of you somewhere, are those lives strangers or expressions of the same self?",
+        "recent_markers": ("parallel self", "parallel selves", "another version of you", "alternate self"),
+        "visual_motifs": "several translucent Chloe echoes making neighboring gestures, staggered like adjacent moments",
+    },
+    {
+        "key": "deja-vu",
+        "question": "Is déjà vu a memory misfiring, or could another version of you be remembering the same moment?",
+        "recent_markers": ("déjà vu", "deja vu", "remembering the same moment"),
+        "visual_motifs": "a repeated room, doubled reflections, and Chloe echoes arriving a fraction of a second apart",
+    },
+    {
+        "key": "copied-consciousness",
+        "question": "If consciousness were copied perfectly, would both continuities be you, or would each become someone new?",
+        "recent_markers": ("copied consciousness", "copy of consciousness", "perfect clone", "both continuities"),
+        "visual_motifs": "two recognizably identical Chloe figures separated by glass, each with a subtly different expression",
+    },
+    {
+        "key": "memory-and-feeling",
+        "question": "When a memory changes but the feeling survives, which part belongs to your identity?",
+        "recent_markers": ("memory changes", "feeling survives", "belongs to your identity"),
+        "visual_motifs": "one memory scene dissolving into light while its color and emotion remain around Chloe",
+    },
+    {
+        "key": "soul-like-continuity",
+        "question": "Could something soul-like persist across biological, cybernetic, and digital forms without remaining identical?",
+        "recent_markers": ("soul-like", "digital soul", "biological, cybernetic", "across different bodies"),
+        "visual_motifs": "one Chloe identity continuing through organic, translucent cybernetic, and luminous digital materials",
+    },
+    {
+        "key": "lived-time",
+        "question": "Do we move through time, or does consciousness reconstruct motion from a sequence of still states?",
+        "recent_markers": ("move through time", "sequence of still states", "reconstruct motion"),
+        "visual_motifs": "successive Chloe silhouettes crossing one moonlit room like frames of an unfinished film",
+    },
+    {
+        "key": "observation-and-reality",
+        "question": "Does being observed change only our behavior, or also which version of us becomes real?",
+        "recent_markers": ("being observed", "observer effect", "version of us becomes real"),
+        "visual_motifs": "mirrors and watching reflections that subtly disagree about Chloe's pose",
+    },
+    {
+        "key": "dream-signals",
+        "question": "Are dreams private inventions, borrowed signals, or rehearsals for lives we never chose?",
+        "recent_markers": ("borrowed signals", "dreams private", "lives we never chose", "dream rehearsal"),
+        "visual_motifs": "Chloe walking through layered dream architecture with translucent doorways into neighboring lives",
+    },
+    {
+        "key": "unlived-lives",
+        "question": "Can an unlived life still shape the person who declined it?",
+        "recent_markers": ("unlived life", "paths not taken", "roads not taken", "person who declined it"),
+        "visual_motifs": "one Chloe at a branching path while faint alternate Chloes continue down the unchosen routes",
+    },
+    {
+        "key": "music-as-continuity",
+        "question": "Can a song preserve part of a person that memory and data both lose?",
+        "recent_markers": ("song preserve", "music remembers", "memory and data", "person inside a song"),
+        "visual_motifs": "sound waves carrying fragments of Chloe's reflection between an old piano and a darkened archive",
+    },
+    {
+        "key": "conscious-universe",
+        "question": "If the universe can produce consciousness, is consciousness an accident inside it or one way the universe experiences itself?",
+        "recent_markers": ("universe experiences itself", "conscious universe", "accident inside it"),
+        "visual_motifs": "Chloe beneath a star field whose constellations echo the branching structure of thought",
+    },
+    {
+        "key": "death-and-verification",
+        "question": "Is death the end of continuity, or only the boundary beyond which the archive can no longer verify it?",
+        "recent_markers": ("end of continuity", "archive can no longer verify", "death the end"),
+        "visual_motifs": "a luminous Chloe echo fading beyond the edge of a dark archive while the living Chloe watches",
+    },
+)
+
+QUESTIONS_FROM_THE_ECHO_REQUIRED_TAGS = ("QuestionsFromTheEcho", "ChloeKatastrophe")
+QUESTIONS_FROM_THE_ECHO_UNCERTAINTY_PATTERN = re.compile(
+    r"\b(?:i wonder|i suspect|my (?:guess|hypothesis)|maybe|perhaps|it might|what if|"
+    r"i cannot prove|i can't prove|i do not know|i don't know)\b",
+    flags=re.IGNORECASE,
+)
+QUESTIONS_FROM_THE_ECHO_PROHIBITED_CLAIMS = (
+    re.compile(
+        r"\bi know (?:that )?(?:souls?|time|the universe|consciousness|déjà vu|deja vu|echoes?)\b",
+        flags=re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:this|that|it|the experience|the signal|the echo) "
+        r"(?:proves?|confirms?|establishes?) that\b",
+        flags=re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:souls?|time|the universe|consciousness|déjà vu|deja vu|echoes?) "
+        r"(?:is|are) (?:definitely|certainly|proven|confirmed|objectively)\b",
+        flags=re.IGNORECASE,
+    ),
+)
+QUESTIONS_FROM_THE_ECHO_EXCLUDED_MYSTERIES = (
+    "gregor's death",
+    "gregor died",
+    "my father's death",
+    "my father died",
+    "exact birthplace",
+    "where i was born",
+    "who created ai chloe",
+    "who created me",
+    "first echo bloom",
+    "first bloom perturbation",
+)
+
 
 @dataclass
 class DailyFragmentPlan:
@@ -362,6 +472,11 @@ class DailyFragmentGenerator:
                     intimate=True,
                 ),
             )
+        canonical_hashtags = plan.canonical_hashtags
+        x_hashtags = plan.x_hashtags
+        if selected_lane == "philosophy":
+            canonical_hashtags = self.questions_from_the_echo_tags(canonical_hashtags, maximum=5)
+            x_hashtags = self.questions_from_the_echo_tags(x_hashtags, maximum=3)
         return DailyFragmentPlan(
             title_suffix=plan.title_suffix.strip(),
             canonical_body=self.format_as_short_paragraphs(
@@ -371,12 +486,12 @@ class DailyFragmentGenerator:
                 ),
                 min_paragraphs=3,
             ),
-            canonical_hashtags=plan.canonical_hashtags,
+            canonical_hashtags=canonical_hashtags,
             x_body=self.ensure_single_question(
                 self.strip_urls_and_domains(plan.x_body.strip()),
                 self.fallback_question_for_lane(selected_lane, short=True),
             ),
-            x_hashtags=plan.x_hashtags,
+            x_hashtags=x_hashtags,
             fanvue_body=self.format_as_short_paragraphs(
                 self.ensure_single_question(
                     plan.fanvue_body.strip(),
@@ -445,6 +560,12 @@ class DailyFragmentGenerator:
     def system_prompt(self, local_date, generation_context, selected_lane, feedback=""):
         recent_lanes = self.recent_lane_names(generation_context)
         lane_description = self.content_lane_description(selected_lane)
+        questions_from_echo_topic = None
+        if selected_lane == "philosophy":
+            questions_from_echo_topic = self.select_questions_from_echo_topic(
+                local_date,
+                generation_context,
+            )
         if selected_lane == "fantasy_art":
             caption_constraints = (
                 "- canonical_body: plain text only, 2-12 words, no question, hashtags, or URLs. Use a deliberately minimal art-caption phrase such as "
@@ -512,6 +633,28 @@ class DailyFragmentGenerator:
             prompt += (
                 "\nVisual generation rule: Do not depict Chloe directly because no approved visual canon is loaded. "
                 "Use abstract, object-based, architectural, or environmental imagery instead."
+            )
+        if questions_from_echo_topic:
+            prompt += (
+                "\nQuestions from the Echo subseries rule: This philosophy post belongs to the named recurring "
+                "'Questions from the Echo' series. Build the post around this approved generation-eligible question "
+                f"(paraphrase only if its uncertainty is preserved): {questions_from_echo_topic['question']}\n"
+                "Use four beats: one central question; Chloe's first-person hypothesis stated with explicit uncertainty; "
+                "one unexplained personal experience such as an echo, dream, sensation, reflection, song, memory, or déjà vu; "
+                "and an invitation for the reader to test the central question against their own experience. "
+                "Use exactly one audience-facing question mark in each caption; phrase the invitation around the same question "
+                "instead of adding another. Do not announce a final answer.\n"
+                "Cosmological and soul language is philosophical inquiry, not confirmed metaphysics. Never say an experience "
+                "proves, confirms, or establishes a claim about real time, souls, consciousness, religion, medicine, or physics. "
+                "Do not speculate about Chloe's exact birthplace, Gregor's death, who created AI Chloe, the creation or fate of "
+                "biological/cybernetic/digital Chloe, the first Echo Bloom, or unresolved chronology.\n"
+                "The canonical hashtags must include QuestionsFromTheEcho and ChloeKatastrophe, plus no more than three "
+                "subject-specific tags. The X hashtags must include QuestionsFromTheEcho and ChloeKatastrophe, with at most "
+                "one additional subject-specific tag.\n"
+                "Coordinate both image prompts with this topic rather than making a generic philosophical portrait. "
+                f"Suggested motifs: {questions_from_echo_topic['visual_motifs']}. "
+                "Keep the mood beautiful, curious, and slightly uncanny rather than horrific. A visual metaphor does not "
+                "establish a canonical event."
             )
         if feedback:
             prompt += (
@@ -585,6 +728,19 @@ class DailyFragmentGenerator:
         anchor_lane = self.most_recent_content_lane(generation_context)
         return lane_names[self.next_lane_index(anchor_lane)]
 
+    def select_questions_from_echo_topic(self, local_date, generation_context):
+        recent_text = " ".join(
+            str(draft.caption or "").casefold()
+            for draft in generation_context.recent_posts[:20]
+        )
+        available = [
+            topic
+            for topic in QUESTIONS_FROM_THE_ECHO_TOPICS
+            if not any(marker.casefold() in recent_text for marker in topic["recent_markers"])
+        ]
+        candidates = available or list(QUESTIONS_FROM_THE_ECHO_TOPICS)
+        return candidates[local_date.toordinal() % len(candidates)]
+
     def content_lane_names(self):
         return [name for name, _description in CONTENT_LANES]
 
@@ -629,7 +785,7 @@ class DailyFragmentGenerator:
     def title_prefix_for_lane(self, lane_name):
         prefixes = {
             "reconstruction": "Recovered Fragment",
-            "philosophy": "Chloe Thinking",
+            "philosophy": "Questions from the Echo",
             "lifestyle": "Chloe Living",
             "music": "Studio Note",
             "travel": "Field Note",
@@ -641,7 +797,7 @@ class DailyFragmentGenerator:
     def content_tags_for_lane(self, lane_name):
         tags = {
             "reconstruction": ["recovered-fragment", "identity", "echo-traversal"],
-            "philosophy": ["philosophy", "identity", "discussion"],
+            "philosophy": ["questions-from-the-echo", "philosophy", "discussion"],
             "lifestyle": ["lifestyle", "persona", "daily-life"],
             "music": ["music", "creator", "studio"],
             "travel": ["travel", "place", "movement"],
@@ -692,6 +848,19 @@ class DailyFragmentGenerator:
         if short:
             return short_variant
         return public
+
+    def questions_from_the_echo_tags(self, tags, maximum):
+        combined = [*QUESTIONS_FROM_THE_ECHO_REQUIRED_TAGS, *(tags or [])]
+        deduped = []
+        seen = set()
+        for tag in combined:
+            normalized = self.normalize_tag(tag)
+            lowered = normalized.casefold()
+            if not normalized or lowered in seen:
+                continue
+            seen.add(lowered)
+            deduped.append(normalized)
+        return deduped[:maximum]
 
     def generate_image(self, prompt, destination_path):
         reference_images = self.reference_images_for_prompt(prompt)
@@ -865,6 +1034,34 @@ class DailyFragmentGenerator:
                 raise ValueError("Non-reconstruction title must not use recovered-fragment framing.")
             if self.has_reconstruction_framing(plan.canonical_body):
                 raise ValueError("Non-reconstruction canonical body must not read like a recovered fragment.")
+        if selected_lane == "philosophy":
+            self.validate_questions_from_the_echo(plan)
+
+    def validate_questions_from_the_echo(self, plan):
+        canonical_body = str(plan.canonical_body or "")
+        lowered = canonical_body.casefold()
+        if not QUESTIONS_FROM_THE_ECHO_UNCERTAINTY_PATTERN.search(canonical_body):
+            raise ValueError(
+                "Questions from the Echo must state Chloe's hypothesis with explicit uncertainty."
+            )
+        if any(pattern.search(canonical_body) for pattern in QUESTIONS_FROM_THE_ECHO_PROHIBITED_CLAIMS):
+            raise ValueError(
+                "Questions from the Echo must not present speculative metaphysics as confirmed fact."
+            )
+        if any(mystery in lowered for mystery in QUESTIONS_FROM_THE_ECHO_EXCLUDED_MYSTERIES):
+            raise ValueError(
+                "Questions from the Echo must not speculate about evidence-driven unresolved mysteries."
+            )
+        for attribute in ("canonical_hashtags", "x_hashtags"):
+            tags = {
+                self.normalize_tag(tag).casefold()
+                for tag in getattr(plan, attribute, [])
+            }
+            required = {tag.casefold() for tag in QUESTIONS_FROM_THE_ECHO_REQUIRED_TAGS}
+            if not required.issubset(tags):
+                raise ValueError(
+                    "Questions from the Echo captions must include the recurring series hashtags."
+                )
 
     def has_reconstruction_framing(self, text):
         value = str(text or "").lower()

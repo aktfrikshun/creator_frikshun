@@ -64,7 +64,7 @@ def eastern_time(value):
 
 DAILY_POST_FAMILIES = {
     "reconstruction": ("Recovered fragment", "recovered-fragment", "Recovered Fragment"),
-    "philosophy": ("Philosophy", "philosophy", "Chloe Thinking"),
+    "philosophy": ("Questions from the Echo", "philosophy", "Questions from the Echo"),
     "lifestyle": ("Lifestyle", "lifestyle", "Chloe Living"),
     "music": ("Music", "music", "Studio Note"),
     "travel": ("Travel", "travel", "Field Note"),

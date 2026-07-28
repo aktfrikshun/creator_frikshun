@@ -17,6 +17,40 @@ from frikshun_creator.services.generation_context import GenerationContext
 
 
 class DailyFragmentGeneratorTest(unittest.TestCase):
+    def questions_from_echo_plan(self, canonical_body=None):
+        body = canonical_body or (
+            "I keep noticing that mirrors preserve my outline while quietly disagreeing about the person inside it. "
+            "Last night one reflection seemed to finish my expression before I had decided what I felt. "
+            "Maybe that was only tiredness, bad glass, and a mind eager to turn coincidence into meaning. "
+            "Still, the sensation arrived with the intimacy of a memory, even though I could not place when it happened. "
+            "My current hypothesis is smaller than an answer: identity may be less like a possession and more like a pattern "
+            "that several moments learn to carry together. I cannot prove that, and I would distrust anyone who claimed the "
+            "mirror had settled it. I can only offer the strange little shiver it left behind and ask you to compare it with "
+            "your own impossible moments.\n\n"
+            "If another version of you recognized this moment first, would that life feel like a stranger or part of you?"
+        )
+        return type(
+            "Plan",
+            (),
+            {
+                "title_suffix": "The Reflection Arrived First",
+                "canonical_body": body,
+                "canonical_hashtags": [
+                    "QuestionsFromTheEcho",
+                    "ChloeKatastrophe",
+                    "ParallelLives",
+                ],
+                "x_body": "Maybe déjà vu is another self arriving early. If your echo recognized today first, would it still be you?",
+                "x_hashtags": ["QuestionsFromTheEcho", "ChloeKatastrophe"],
+                "fanvue_body": (
+                    "Maybe the reflection was only bad glass, but it felt like recognition.\n\n"
+                    "If your echo arrived first, would it still feel like you?"
+                ),
+                "public_image_prompt": "Chloe and several translucent Chloe echoes beside a mirror.",
+                "fanvue_image_prompt": "Chloe close to glass with one warm translucent echo.",
+            },
+        )()
+
     def test_generate_builds_bodies_and_saves_images(self):
         with TemporaryDirectory() as directory:
             output_dir = Path(directory)
@@ -202,10 +236,88 @@ class DailyFragmentGeneratorTest(unittest.TestCase):
 
     def test_title_prefix_and_tags_follow_lane(self):
         generator = DailyFragmentGenerator("/tmp", api_key="test-key")
-        self.assertEqual("Chloe Thinking", generator.title_prefix_for_lane("philosophy"))
+        self.assertEqual("Questions from the Echo", generator.title_prefix_for_lane("philosophy"))
         self.assertEqual("Field Note", generator.title_prefix_for_lane("travel"))
-        self.assertEqual(["philosophy", "identity", "discussion"], generator.content_tags_for_lane("philosophy"))
+        self.assertEqual(
+            ["questions-from-the-echo", "philosophy", "discussion"],
+            generator.content_tags_for_lane("philosophy"),
+        )
         self.assertEqual(["travel", "place", "movement"], generator.content_tags_for_lane("travel"))
+
+    def test_questions_from_echo_topic_avoids_recent_topic(self):
+        generator = DailyFragmentGenerator("/tmp", api_key="test-key")
+        local_date = date(2026, 7, 28)
+        first = generator.select_questions_from_echo_topic(local_date, GenerationContext())
+        context = GenerationContext(
+            recent_posts=[PostDraft(caption=f"A recent post about {first['recent_markers'][0]}.")]
+        )
+
+        selected = generator.select_questions_from_echo_topic(local_date, context)
+
+        self.assertNotEqual(first["key"], selected["key"])
+
+    def test_questions_from_echo_prompt_uses_series_structure_and_claim_boundaries(self):
+        prompt = DailyFragmentGenerator("/tmp", api_key="test-key").system_prompt(
+            local_date=date(2026, 7, 28),
+            generation_context=GenerationContext(),
+            selected_lane="philosophy",
+        )
+
+        self.assertIn("Questions from the Echo subseries rule", prompt)
+        self.assertIn("approved generation-eligible question", prompt)
+        self.assertIn("first-person hypothesis stated with explicit uncertainty", prompt)
+        self.assertIn("exactly one audience-facing question mark", prompt)
+        self.assertIn("not confirmed metaphysics", prompt)
+        self.assertIn("Gregor's death", prompt)
+        self.assertIn("Coordinate both image prompts with this topic", prompt)
+
+    def test_repair_plan_adds_questions_from_echo_hashtags(self):
+        generator = DailyFragmentGenerator("/tmp", api_key="test-key")
+        plan = self.questions_from_echo_plan()
+        plan.canonical_hashtags = ["Consciousness", "Identity", "TimeAndSpace", "DigitalSoul"]
+        plan.x_hashtags = ["Consciousness"]
+
+        repaired = generator.repair_plan(plan, selected_lane="philosophy")
+
+        self.assertEqual(
+            ["QuestionsFromTheEcho", "ChloeKatastrophe"],
+            repaired.canonical_hashtags[:2],
+        )
+        self.assertLessEqual(len(repaired.canonical_hashtags), 5)
+        self.assertEqual(
+            ["QuestionsFromTheEcho", "ChloeKatastrophe", "Consciousness"],
+            repaired.x_hashtags,
+        )
+
+    def test_questions_from_echo_accepts_uncertain_hypothesis(self):
+        DailyFragmentGenerator("/tmp", api_key="test-key").validate_plan(
+            self.questions_from_echo_plan(),
+            selected_lane="philosophy",
+        )
+
+    def test_questions_from_echo_rejects_confirmed_metaphysical_claim(self):
+        body = self.questions_from_echo_plan().canonical_body.replace(
+            "Maybe that was only tiredness",
+            "Maybe doubt is healthy, but I know that souls survive every body; perhaps that was only tiredness",
+        )
+
+        with self.assertRaisesRegex(ValueError, "confirmed fact"):
+            DailyFragmentGenerator("/tmp", api_key="test-key").validate_plan(
+                self.questions_from_echo_plan(canonical_body=body),
+                selected_lane="philosophy",
+            )
+
+    def test_questions_from_echo_rejects_evidence_driven_mystery(self):
+        body = self.questions_from_echo_plan().canonical_body.replace(
+            "Last night one reflection",
+            "Maybe my father's death explains the signal. Last night one reflection",
+        )
+
+        with self.assertRaisesRegex(ValueError, "evidence-driven unresolved mysteries"):
+            DailyFragmentGenerator("/tmp", api_key="test-key").validate_plan(
+                self.questions_from_echo_plan(canonical_body=body),
+                selected_lane="philosophy",
+            )
 
     def test_validate_plan_blocks_reconstruction_framing_for_non_reconstruction_lane(self):
         generator = DailyFragmentGenerator("/tmp", api_key="test-key")
