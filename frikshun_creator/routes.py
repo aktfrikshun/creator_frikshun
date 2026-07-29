@@ -566,6 +566,10 @@ def index():
     posts = posts_query.order_by(Artifact.created_at.desc()).limit(60).all()
     for post in posts:
         post.daily_post_family = daily_post_family(post)
+        active_drafts = [draft for draft in post.post_drafts if not draft.archived]
+        post.deletable_draft = bool(active_drafts) and all(
+            draft.status == "draft" and not draft.publications for draft in active_drafts
+        )
         published_platforms = {
             publication.platform
             for draft in post.post_drafts
@@ -973,7 +977,7 @@ def generate_daily_fragment():
     project_root = Path(current_app.root_path).parent
     log_path = Path(current_app.instance_path) / "daily-fragment-adhoc.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    command = [sys.executable, "-m", "flask", "--app", "app", "run-daily-fragment-autopilot"]
+    command = [sys.executable, "-m", "flask", "--app", "app", "generate-daily-fragment-run"]
     if family:
         command.extend(("--family", family))
     with log_path.open("ab") as log_file:
@@ -986,9 +990,35 @@ def generate_daily_fragment():
         )
     family_label = DAILY_POST_FAMILIES[family][0] if family else "Automatically selected"
     flash(
-        f"Today’s {family_label.lower()} post run has started. Refresh the library in a few minutes to see it.",
+        f"Your {family_label.lower()} auto draft has started. "
+        "Refresh the library in a few minutes to review it.",
         "success",
     )
+    return redirect(url_for("creator.index"))
+
+
+@bp.post("/posts/<int:artifact_id>/delete-draft")
+def delete_draft_post(artifact_id):
+    session = get_session()
+    artifact = session.get(Artifact, artifact_id)
+    if artifact is None or artifact.archived:
+        flash("Draft post not found.", "error")
+        return redirect(url_for("creator.index"))
+
+    active_drafts = [draft for draft in artifact.post_drafts if not draft.archived]
+    if not active_drafts or any(
+        draft.status != "draft" or draft.publications for draft in active_drafts
+    ):
+        flash("Only unpublished draft posts can be deleted.", "error")
+        return redirect(url_for("creator.index"))
+
+    artifact.archived = True
+    artifact.updated_at = datetime.now(timezone.utc)
+    for draft in active_drafts:
+        draft.archived = True
+        draft.updated_at = artifact.updated_at
+    session.commit()
+    flash(f'Draft post “{artifact.title}” deleted.', "success")
     return redirect(url_for("creator.index"))
 
 

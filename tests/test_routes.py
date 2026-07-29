@@ -878,9 +878,9 @@ class RoutesTest(unittest.TestCase):
         response = self.client.post("/daily-fragments/generate", follow_redirects=True)
 
         self.assertEqual(200, response.status_code)
-        self.assertIn(b"automatically selected post run has started", response.data)
+        self.assertIn(b"automatically selected auto draft has started", response.data)
         command = popen.call_args.args[0]
-        self.assertEqual("run-daily-fragment-autopilot", command[-1])
+        self.assertEqual("generate-daily-fragment-run", command[-1])
 
     @patch("frikshun_creator.routes.subprocess.Popen")
     def test_generate_daily_fragment_passes_selected_family(self, popen):
@@ -891,7 +891,7 @@ class RoutesTest(unittest.TestCase):
         )
 
         self.assertEqual(200, response.status_code)
-        self.assertIn(b"travel post run has started", response.data)
+        self.assertIn(b"travel auto draft has started", response.data)
         command = popen.call_args.args[0]
         self.assertEqual(["--family", "travel"], command[-2:])
 
@@ -904,9 +904,75 @@ class RoutesTest(unittest.TestCase):
         )
 
         self.assertEqual(200, response.status_code)
-        self.assertIn(b"beautiful fantasy art post run has started", response.data)
+        self.assertIn(b"beautiful fantasy art auto draft has started", response.data)
         command = popen.call_args.args[0]
         self.assertEqual(["--family", "fantasy_art"], command[-2:])
+
+    def test_post_library_offers_auto_draft_family_selection(self):
+        response = self.client.get("/")
+
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"Auto Draft Post", response.data)
+        self.assertIn(b'name="family"', response.data)
+        self.assertIn(b'value="philosophy"', response.data)
+        self.assertIn(b'value="fantasy_art"', response.data)
+
+    def test_post_library_can_delete_unpublished_draft_post_with_confirmation(self):
+        with self.app.app_context():
+            session = get_session()
+            artifact = Artifact(
+                title="Disposable Draft",
+                generated_metadata={"workflow": "custom_post_v1"},
+            )
+            session.add(artifact)
+            session.flush()
+            session.add(PostDraft(artifact=artifact, platform="x", caption="Still a draft?"))
+            session.commit()
+            artifact_id = artifact.id
+
+        listing = self.client.get("/")
+        self.assertIn(f'/posts/{artifact_id}/delete-draft'.encode(), listing.data)
+        self.assertIn(b"Delete this draft post?", listing.data)
+
+        response = self.client.post(
+            f"/posts/{artifact_id}/delete-draft",
+            follow_redirects=True,
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"Disposable Draft", response.data)
+        self.assertIn(b"deleted", response.data)
+        with self.app.app_context():
+            session = get_session()
+            deleted = session.get(Artifact, artifact_id)
+            self.assertTrue(deleted.archived)
+            self.assertTrue(deleted.post_drafts[0].archived)
+
+    def test_delete_draft_post_rejects_post_with_publication_history(self):
+        with self.app.app_context():
+            session = get_session()
+            artifact = Artifact(title="Published History")
+            draft = PostDraft(artifact=artifact, platform="x", caption="Already sent?", status="draft")
+            session.add(artifact)
+            session.flush()
+            session.add(PostPublication(
+                post_draft=draft,
+                platform="x",
+                status="published",
+                external_post_id="post-1",
+            ))
+            session.commit()
+            artifact_id = artifact.id
+
+        response = self.client.post(
+            f"/posts/{artifact_id}/delete-draft",
+            follow_redirects=True,
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"Only unpublished draft posts can be deleted", response.data)
+        with self.app.app_context():
+            self.assertFalse(get_session().get(Artifact, artifact_id).archived)
 
     @patch("frikshun_creator.routes.subprocess.Popen")
     def test_publish_daily_fragment_starts_saved_run_publisher(self, popen):

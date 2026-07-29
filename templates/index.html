@@ -92,6 +92,7 @@
       .hero h2 { max-width: 650px; margin: 0; font: 500 clamp(34px, 5vw, 58px)/1.02 Georgia, serif; letter-spacing: -.025em; }
       .hero-copy { max-width: 610px; margin: 18px 0 0; color: #cfc5be; line-height: 1.65; }
 
+      .hero-actions { display: flex; align-items: flex-end; gap: 12px; position: relative; z-index: 1; }
       .generate { display: grid; gap: 10px; min-width: 220px; margin: 0; position: relative; z-index: 1; }
       .generate label { color: #cfc5be; font-size: 12px; font-weight: 750; letter-spacing: .04em; }
       .generate select {
@@ -211,6 +212,8 @@
         .masthead, .library-head { align-items: flex-start; }
         .nav { display: none; }
         .hero { grid-template-columns: 1fr; padding: 30px 24px; }
+        .hero-actions { align-items: stretch; flex-wrap: wrap; }
+        .generate { flex: 1 1 220px; }
         .searchbar { grid-template-columns: 1fr 1fr; }
         .searchbar input { grid-column: 1 / -1; }
         .post-card { grid-template-columns: 100px minmax(0, 1fr); }
@@ -253,7 +256,19 @@
           <h2 id="hero-title">Bring your own image and words.</h2>
           <p class="hero-copy">Creator OS curates platform-ready drafts for Facebook, Instagram, Threads, X, and FanVue. You review everything before it publishes.</p>
         </div>
-        <a class="primary" href="{{ url_for('creator.new_custom_post') }}">Create draft post</a>
+        <div class="hero-actions">
+          <a class="primary" href="{{ url_for('creator.new_custom_post') }}">Create Draft Post</a>
+          <form class="generate" action="{{ url_for('creator.generate_daily_fragment') }}" method="post">
+            <label for="auto-draft-family">Post family</label>
+            <select id="auto-draft-family" name="family">
+              <option value="">Automatic rotation</option>
+              {% for family_key, family_details in daily_post_families.items() %}
+                <option value="{{ family_key }}">{{ family_details[0] }}</option>
+              {% endfor %}
+            </select>
+            <button class="primary" type="submit">Auto Draft Post</button>
+          </form>
+        </div>
       </section>
 
       {% for category, message in get_flashed_messages(with_categories=true) %}
@@ -352,6 +367,11 @@
                 {% if post.generated_metadata.get('workflow') == 'custom_post_v1' %}
                   <div class="post-actions">
                     <a class="action strong" href="{{ url_for('creator.review_custom_post', artifact_id=post.id) }}">Review &amp; publish</a>
+                    {% if post.deletable_draft %}
+                      <form action="{{ url_for('creator.delete_draft_post', artifact_id=post.id) }}" method="post" onsubmit="return confirm('Delete this draft post? It will be removed from the post library.');">
+                        <button class="action" type="submit">Delete</button>
+                      </form>
+                    {% endif %}
                   </div>
                 {% elif is_daily %}
                   <div class="post-actions">
@@ -364,6 +384,11 @@
                     {% else %}
                       <form action="{{ url_for('creator.publish_daily_fragment', artifact_id=post.id) }}" method="post">
                         <button class="action strong" type="submit">Publish</button>
+                      </form>
+                    {% endif %}
+                    {% if post.deletable_draft %}
+                      <form action="{{ url_for('creator.delete_draft_post', artifact_id=post.id) }}" method="post" onsubmit="return confirm('Delete this draft post? It will be removed from the post library.');">
+                        <button class="action" type="submit">Delete</button>
                       </form>
                     {% endif %}
                     <a class="action" href="{{ url_for('creator.daily_fragment_manual_posting_kit', artifact_id=post.id) }}">Download posting kit</a>

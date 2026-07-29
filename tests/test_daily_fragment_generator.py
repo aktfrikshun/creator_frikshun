@@ -357,6 +357,36 @@ class DailyFragmentGeneratorTest(unittest.TestCase):
         self.assertEqual(1, repaired.count("?"))
         self.assertIn("Who am I now?", repaired)
 
+    def test_repair_plan_fits_x_body_and_hashtags_to_editorial_limit(self):
+        generator = DailyFragmentGenerator("/tmp", api_key="test-key")
+        plan = self.questions_from_echo_plan()
+        plan.x_body = (
+            "Maybe another self reached this moment before I did, leaving a very long "
+            "trail of almost-memories and beautifully inconvenient evidence behind. "
+            "If your echo recognized today first, would it still be you?"
+        )
+
+        repaired = generator.repair_plan(plan, selected_lane="philosophy")
+        composed = generator.compose_x_body(repaired.x_body, repaired.x_hashtags)
+
+        self.assertLessEqual(len(composed), 190)
+        self.assertEqual(1, composed.count("?"))
+        self.assertIn("#QuestionsFromTheEcho", composed)
+        self.assertIn("#ChloeKatastrophe", composed)
+
+    def test_repair_x_copy_drops_optional_tags_before_sacrificing_question(self):
+        generator = DailyFragmentGenerator("/tmp", api_key="test-key")
+        body, tags = generator.repair_x_copy(
+            "A long preface " * 30,
+            ["A" * 40, "B" * 40, "C" * 40, "D" * 40],
+            fallback_question="Which version still feels true?",
+        )
+        composed = generator.compose_x_body(body, tags)
+
+        self.assertLessEqual(len(composed), 190)
+        self.assertEqual(1, composed.count("?"))
+        self.assertLess(len(tags), 4)
+
     def test_format_as_short_paragraphs_inserts_breaks(self):
         generator = DailyFragmentGenerator("/tmp", api_key="test-key")
         formatted = generator.format_as_short_paragraphs(

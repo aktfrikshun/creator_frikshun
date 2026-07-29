@@ -209,6 +209,7 @@ QUESTIONS_FROM_THE_ECHO_TOPICS = (
 )
 
 QUESTIONS_FROM_THE_ECHO_REQUIRED_TAGS = ("QuestionsFromTheEcho", "ChloeKatastrophe")
+X_GENERATED_CAPTION_LIMIT = 190
 QUESTIONS_FROM_THE_ECHO_UNCERTAINTY_PATTERN = re.compile(
     r"\b(?:i wonder|i suspect|my (?:guess|hypothesis)|maybe|perhaps|it might|what if|"
     r"i cannot prove|i can't prove|i do not know|i don't know)\b",
@@ -477,6 +478,11 @@ class DailyFragmentGenerator:
         if selected_lane == "philosophy":
             canonical_hashtags = self.questions_from_the_echo_tags(canonical_hashtags, maximum=5)
             x_hashtags = self.questions_from_the_echo_tags(x_hashtags, maximum=3)
+        x_body, x_hashtags = self.repair_x_copy(
+            plan.x_body,
+            x_hashtags,
+            fallback_question=self.fallback_question_for_lane(selected_lane, short=True),
+        )
         return DailyFragmentPlan(
             title_suffix=plan.title_suffix.strip(),
             canonical_body=self.format_as_short_paragraphs(
@@ -487,10 +493,7 @@ class DailyFragmentGenerator:
                 min_paragraphs=3,
             ),
             canonical_hashtags=canonical_hashtags,
-            x_body=self.ensure_single_question(
-                self.strip_urls_and_domains(plan.x_body.strip()),
-                self.fallback_question_for_lane(selected_lane, short=True),
-            ),
+            x_body=x_body,
             x_hashtags=x_hashtags,
             fanvue_body=self.format_as_short_paragraphs(
                 self.ensure_single_question(
@@ -1019,8 +1022,11 @@ class DailyFragmentGenerator:
         if word_count < 90 or word_count > 220:
             raise ValueError("Canonical body must be 90-220 words before the footer.")
         x_text = self.compose_x_body(plan.x_body, plan.x_hashtags)
-        if len(x_text) > 190:
-            raise ValueError("X body plus hashtags must be 190 characters or fewer before adapter processing.")
+        if len(x_text) > X_GENERATED_CAPTION_LIMIT:
+            raise ValueError(
+                f"X body plus hashtags must be {X_GENERATED_CAPTION_LIMIT} characters or fewer "
+                "before adapter processing."
+            )
         if re.search(r"https?://|\b[a-z0-9.-]+\.[a-z]{2,}\b", plan.x_body, flags=re.IGNORECASE):
             raise ValueError("X body must not contain URLs or domains.")
         if not plan.public_image_prompt or not plan.fanvue_image_prompt:
@@ -1123,6 +1129,38 @@ class DailyFragmentGenerator:
                 value = value.rstrip()
             value = f"{value} {fallback_question}".strip()
         return value
+
+    def repair_x_copy(self, body, hashtags, fallback_question):
+        """Fit generated X copy to the editorial limit before validation."""
+        tags = []
+        seen = set()
+        for value in hashtags or []:
+            tag = self.normalize_tag(value)
+            lowered = tag.casefold()
+            if tag and lowered not in seen:
+                seen.add(lowered)
+                tags.append(tag)
+
+        fallback = self.ensure_single_question("", fallback_question)
+        while tags:
+            suffix = " ".join(f"#{tag}" for tag in tags)
+            available = X_GENERATED_CAPTION_LIMIT - len(suffix) - 2
+            if available >= len(fallback):
+                break
+            tags.pop()
+
+        suffix = " ".join(f"#{tag}" for tag in tags)
+        available = X_GENERATED_CAPTION_LIMIT - len(suffix) - (2 if suffix else 0)
+        cleaned = self.ensure_single_question(
+            self.strip_urls_and_domains(str(body or "").strip()),
+            fallback,
+        )
+        fitted = self.truncate_preserving_question(cleaned, available)
+        if len(fitted) > available or self.question_count(fitted) != 1:
+            fitted = fallback
+        if len(fitted) > available:
+            fitted = f"{fitted[:max(0, available - 1)].rstrip()}?"[:available]
+        return fitted, tags
 
     def repair_art_caption(self, text):
         value = self.strip_urls_and_domains(text)
