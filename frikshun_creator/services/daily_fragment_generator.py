@@ -1,9 +1,12 @@
 import base64
 import json
+import logging
 import os
+import random
 import re
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -12,6 +15,9 @@ import requests
 from PIL import Image
 
 from .daily_fragment_workflow import DailyFragmentPackage
+
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_CHLOE_REFERENCE_IMAGE_CANDIDATES = (
@@ -281,14 +287,20 @@ class DailyFragmentGenerator:
         chloe_reference_images=None,
         openai_rate_limit_retries=3,
         openai_rate_limit_max_sleep_seconds=20,
+        openai_connect_timeout_seconds=10,
+        openai_read_timeout_seconds=300,
+        openai_reasoning_read_timeout_seconds=600,
     ):
         self.upload_folder = Path(upload_folder)
         self.text_model = text_model or os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1")
         self.image_model = image_model or os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
         self.api_key = api_key or os.getenv("OPENAI_API_KEY", "")
         self.max_plan_attempts = max(1, int(max_plan_attempts))
-        env_retry_count = os.getenv("OPENAI_RATE_LIMIT_RETRIES")
+        env_retry_count = os.getenv("OPENAI_REQUEST_RETRIES") or os.getenv("OPENAI_RATE_LIMIT_RETRIES")
         env_max_sleep = os.getenv("OPENAI_RATE_LIMIT_MAX_SLEEP_SECONDS")
+        env_connect_timeout = os.getenv("OPENAI_CONNECT_TIMEOUT_SECONDS")
+        env_read_timeout = os.getenv("OPENAI_READ_TIMEOUT_SECONDS")
+        env_reasoning_read_timeout = os.getenv("OPENAI_REASONING_READ_TIMEOUT_SECONDS")
         self.openai_rate_limit_retries = max(
             0,
             int(env_retry_count if env_retry_count not in (None, "") else openai_rate_limit_retries),
@@ -296,6 +308,18 @@ class DailyFragmentGenerator:
         self.openai_rate_limit_max_sleep_seconds = max(
             1,
             int(env_max_sleep if env_max_sleep not in (None, "") else openai_rate_limit_max_sleep_seconds),
+        )
+        self.openai_connect_timeout_seconds = max(
+            1,
+            int(env_connect_timeout or openai_connect_timeout_seconds),
+        )
+        self.openai_read_timeout_seconds = max(
+            1,
+            int(env_read_timeout or openai_read_timeout_seconds),
+        )
+        self.openai_reasoning_read_timeout_seconds = max(
+            self.openai_read_timeout_seconds,
+            int(env_reasoning_read_timeout or openai_reasoning_read_timeout_seconds),
         )
         configured_references = self.normalize_reference_image_paths(
             chloe_reference_images
@@ -310,6 +334,7 @@ class DailyFragmentGenerator:
         if selected_lane and selected_lane not in self.content_lane_names():
             raise ValueError(f"Unknown daily post family: {selected_lane}")
         selected_lane = selected_lane or self.select_content_lane(local_date, generation_context)
+        visual_mode = self.select_visual_mode(generation_context, selected_lane)
         feedback = ""
         last_error = None
         plan = None
@@ -318,9 +343,10 @@ class DailyFragmentGenerator:
                 local_date,
                 generation_context,
                 selected_lane=selected_lane,
+                visual_mode=visual_mode,
                 feedback=feedback,
             )
-            plan = self.repair_plan(plan, selected_lane=selected_lane)
+            plan = self.repair_plan(plan, selected_lane=selected_lane, visual_mode=visual_mode)
             try:
                 self.validate_plan(plan, selected_lane=selected_lane)
                 last_error = None
@@ -354,6 +380,8 @@ class DailyFragmentGenerator:
             public_image_path=public_path,
             fanvue_image_path=public_path,
             content_tags=self.content_tags_for_lane(selected_lane),
+            content_lane=selected_lane,
+            visual_mode=visual_mode,
             generation_warnings=warnings,
             public_image_prompt=plan.public_image_prompt,
             fanvue_image_prompt=plan.fanvue_image_prompt,
@@ -453,7 +481,7 @@ class DailyFragmentGenerator:
             previews.append(self.generate_preview(local_date, generation_context, selected_lane))
         return previews
 
-    def repair_plan(self, plan, selected_lane):
+    def repair_plan(self, plan, selected_lane, visual_mode=""):
         if selected_lane == "fantasy_art":
             return DailyFragmentPlan(
                 title_suffix=plan.title_suffix.strip(),
@@ -466,11 +494,13 @@ class DailyFragmentGenerator:
                     plan.public_image_prompt.strip(),
                     selected_lane=selected_lane,
                     intimate=False,
+                    visual_mode=visual_mode,
                 ),
                 fanvue_image_prompt=self.repair_image_prompt(
                     plan.fanvue_image_prompt.strip(),
                     selected_lane=selected_lane,
                     intimate=True,
+                    visual_mode=visual_mode,
                 ),
             )
         canonical_hashtags = plan.canonical_hashtags
@@ -506,17 +536,20 @@ class DailyFragmentGenerator:
                 plan.public_image_prompt.strip(),
                 selected_lane=selected_lane,
                 intimate=False,
+                visual_mode=visual_mode,
             ),
             fanvue_image_prompt=self.repair_image_prompt(
                 plan.fanvue_image_prompt.strip(),
                 selected_lane=selected_lane,
                 intimate=True,
+                visual_mode=visual_mode,
             ),
         )
 
-    def generate_plan(self, local_date, generation_context, selected_lane, feedback=""):
+    def generate_plan(self, local_date, generation_context, selected_lane, feedback="", model=None, visual_mode=""):
         if not self.api_key:
             raise ValueError("OPENAI_API_KEY is required for daily fragment generation.")
+        model = model or self.text_model
         response = self.post_with_rate_limit_retry(
             "https://api.openai.com/v1/responses",
             headers={
@@ -524,7 +557,7 @@ class DailyFragmentGenerator:
                 "Content-Type": "application/json",
             },
             json={
-                "model": self.text_model,
+                "model": model,
                 "input": [
                     {
                         "role": "system",
@@ -535,6 +568,7 @@ class DailyFragmentGenerator:
                                     local_date,
                                     generation_context,
                                     selected_lane=selected_lane,
+                                    visual_mode=visual_mode,
                                     feedback=feedback,
                                 ),
                             }
@@ -543,7 +577,7 @@ class DailyFragmentGenerator:
                 ],
                 "text": {"format": {"type": "json_object"}},
             },
-            timeout=90,
+            timeout=self.openai_request_timeout(model),
         )
         response.raise_for_status()
         payload = response.json()
@@ -560,9 +594,12 @@ class DailyFragmentGenerator:
             fanvue_image_prompt=str(data.get("fanvue_image_prompt") or "").strip(),
         )
 
-    def system_prompt(self, local_date, generation_context, selected_lane, feedback=""):
+    def system_prompt(self, local_date, generation_context, selected_lane, feedback="", visual_mode=""):
         recent_lanes = self.recent_lane_names(generation_context)
         lane_description = self.content_lane_description(selected_lane)
+        visual_mode = visual_mode or self.select_visual_mode(generation_context, selected_lane)
+        visual_direction = self.visual_mode_direction(visual_mode, selected_lane)
+        recent_visuals = "; ".join((getattr(generation_context, "recent_image_prompts", []) or [])[:4])
         questions_from_echo_topic = None
         if selected_lane == "philosophy":
             questions_from_echo_topic = self.select_questions_from_echo_topic(
@@ -614,11 +651,16 @@ class DailyFragmentGenerator:
             "- Default to depicting Chloe herself, in her approved visual canon, when visual canon guidance is available and the subject supports a character-centered image.\n"
             "- If an image depicts Chloe, it must explicitly aim for the approved Chloe Katastrophe visual canon and be recognizable as Chloe, not a generic woman.\n"
             "- Only prefer abstract art, objects, places, reflections, hands, silhouettes, or still-life imagery when the subject clearly works better without showing Chloe directly.\n"
+            f"- Required visual mode today: {visual_mode}. {visual_direction}\n"
+            "- Avoid mirrors, reflective-glass portraits, duplicate Chloes, alternate versions, translucent Chloe echoes, and static close-up portraiture unless today's subject makes one uniquely necessary. These motifs are currently overused.\n"
+            "- When Chloe appears in an action-oriented mode, show a believable full-body action with visible posture, limbs, environment, and narrative purpose—not a standing fashion pose cropped at the waist.\n"
+            "- Beautiful art may use painterly, illustrative, surreal, mixed-media, or cinematic environmental composition while preserving Chloe's identity whenever she is depicted.\n"
             "- Avoid repeating ideas or phrasing from recent posts.\n"
             f"- Avoid these recently used content lanes when possible: {recent_lanes or 'none recorded'}.\n"
             f"Canon guidance:\n{generation_context.canon_excerpt or 'No canon excerpt available.'}\n"
             f"Visual canon guidance:\n{generation_context.visual_excerpt or 'No visual canon excerpt available.'}\n"
             f"Recent post excerpt:\n{generation_context.recent_post_excerpt or 'No recent post excerpt available.'}\n"
+            f"Recent image prompts to avoid repeating:\n{recent_visuals or 'No recent image prompts recorded.'}\n"
             f"Creator review lessons:\n{generation_context.review_feedback_excerpt or 'No rejected-generation feedback available.'}"
         )
         if selected_lane == "fantasy_art":
@@ -670,20 +712,121 @@ class DailyFragmentGenerator:
         attempts = self.openai_rate_limit_retries + 1
         last_error = None
         for attempt in range(1, attempts + 1):
-            response = requests.post(url, **kwargs)
+            started_at = time.monotonic()
+            response = None
+            phase = "before_response"
+            request_json = kwargs.get("json") or {}
+            model = str(request_json.get("model") or "unknown")
+            client_request_id = str(uuid.uuid4())
+            headers = dict(kwargs.get("headers") or {})
+            headers["X-Client-Request-Id"] = client_request_id
+            request_kwargs = dict(kwargs)
+            request_kwargs["headers"] = headers
+            request_kwargs["stream"] = True
             try:
+                response = requests.post(url, **request_kwargs)
+                phase = "response_body"
+                # Force the streamed response body to be read here so body-transfer
+                # timeouts participate in the same bounded retry policy.
+                response.content
                 response.raise_for_status()
+                self.log_openai_request(
+                    url=url,
+                    model=model,
+                    attempt=attempt,
+                    duration_seconds=time.monotonic() - started_at,
+                    response=response,
+                    client_request_id=client_request_id,
+                    phase="completed",
+                )
                 return response
-            except requests.HTTPError as error:
+            except requests.RequestException as error:
                 last_error = error
-                if not self.is_rate_limit_error(error):
+                self.log_openai_request(
+                    url=url,
+                    model=model,
+                    attempt=attempt,
+                    duration_seconds=time.monotonic() - started_at,
+                    response=response,
+                    client_request_id=client_request_id,
+                    phase=phase,
+                    error=error,
+                )
+                if not self.is_retryable_openai_error(error):
                     raise
                 if attempt >= attempts:
                     raise
-                time.sleep(self.rate_limit_sleep_seconds(error, attempt))
+                if response is not None:
+                    response.close()
+                time.sleep(self.openai_retry_sleep_seconds(error, attempt))
         if last_error:
             raise last_error
         raise RuntimeError("OpenAI request failed without an HTTP response.")
+
+    def openai_request_timeout(self, model):
+        read_timeout = (
+            self.openai_reasoning_read_timeout_seconds
+            if self.is_reasoning_model(model)
+            else self.openai_read_timeout_seconds
+        )
+        return (self.openai_connect_timeout_seconds, read_timeout)
+
+    @staticmethod
+    def is_reasoning_model(model):
+        normalized = str(model or "").lower()
+        return normalized.startswith(("gpt-5", "o1", "o3", "o4")) or "reasoning" in normalized
+
+    def is_retryable_openai_error(self, error):
+        if isinstance(
+            error,
+            (requests.Timeout, requests.ConnectionError, requests.exceptions.ChunkedEncodingError),
+        ):
+            return True
+        response = getattr(error, "response", None)
+        status_code = getattr(response, "status_code", None)
+        return status_code in (408, 409, 429) or bool(status_code and status_code >= 500)
+
+    def openai_retry_sleep_seconds(self, error, attempt):
+        if self.is_rate_limit_error(error):
+            response = getattr(error, "response", None)
+            retry_after = (getattr(response, "headers", {}) or {}).get("retry-after")
+            if retry_after:
+                try:
+                    return min(self.openai_rate_limit_max_sleep_seconds, max(0.0, float(retry_after)))
+                except ValueError:
+                    pass
+        ceiling = min(self.openai_rate_limit_max_sleep_seconds, 2 ** max(0, attempt - 1))
+        return random.uniform(0, ceiling)
+
+    @staticmethod
+    def log_openai_request(
+        url,
+        model,
+        attempt,
+        duration_seconds,
+        response,
+        client_request_id,
+        phase,
+        error=None,
+    ):
+        headers = getattr(response, "headers", {}) or {}
+        status_code = getattr(response, "status_code", None)
+        status_code = status_code if isinstance(status_code, int) else None
+        request_id = headers.get("x-request-id") if hasattr(headers, "get") else None
+        request_id = request_id if isinstance(request_id, str) and request_id else None
+        event = {
+            "endpoint": url,
+            "model": model,
+            "attempt": attempt,
+            "duration_seconds": round(duration_seconds, 3),
+            "http_status": status_code,
+            "x_request_id": request_id,
+            "x_client_request_id": client_request_id,
+            "phase": phase,
+            "error_type": type(error).__name__ if error else None,
+        }
+        log = logger.warning if error else logger.info
+        log("openai_request %s", json.dumps(event, sort_keys=True))
 
     def is_rate_limit_error(self, error):
         response = getattr(error, "response", None)
@@ -728,8 +871,46 @@ class DailyFragmentGenerator:
 
     def select_content_lane(self, local_date, generation_context):
         lane_names = self.content_lane_names()
-        anchor_lane = self.most_recent_content_lane(generation_context)
-        return lane_names[self.next_lane_index(anchor_lane)]
+        recent_lanes = list(getattr(generation_context, "recent_content_lanes", []) or [])
+        if not recent_lanes:
+            recent_lanes = self.recent_lane_names(generation_context)
+        excluded = set(recent_lanes[:3])
+        candidates = [lane for lane in lane_names if lane not in excluded]
+        if not candidates:
+            candidates = [lane for lane in lane_names if lane != (recent_lanes[0] if recent_lanes else None)]
+        return random.choice(candidates or lane_names)
+
+    def select_visual_mode(self, generation_context, selected_lane):
+        if selected_lane == "fantasy_art":
+            return "fine_art"
+        modes = ["full_body_action", "environmental_story", "fine_art", "portrait"]
+        recent = list(getattr(generation_context, "recent_visual_modes", []) or [])
+        excluded = set(recent[:2])
+        candidates = [mode for mode in modes if mode not in excluded]
+        if not recent:
+            candidates = ["full_body_action", "environmental_story", "fine_art"]
+        return random.choice(candidates or modes)
+
+    def visual_mode_direction(self, visual_mode, selected_lane):
+        directions = {
+            "full_body_action": (
+                "Create a dynamic head-to-toe composition of Chloe performing a lane-appropriate action in a real environment. "
+                "Use motion, gesture, spatial depth, and an expressive silhouette; avoid mirrors and duplicate figures."
+            ),
+            "environmental_story": (
+                "Create a wide or medium-wide narrative scene where environment, light, objects, and action carry meaning. "
+                "Chloe may be a smaller full figure or the artifact/place may lead; do not default to a face-centered portrait."
+            ),
+            "fine_art": (
+                "Create a beautiful, clearly intentional artwork in a named non-photographic or hybrid medium—painting, watercolor, "
+                "charcoal, ink, collage, mixed media, or expressive concept art. Avoid a portrait pasted onto a decorative background."
+            ),
+            "portrait": (
+                "Create an editorial portrait with an unusual camera angle, meaningful gesture, distinctive setting, and narrative action. "
+                "No mirror, duplicate Chloe, alternate version, or generic static beauty pose."
+            ),
+        }
+        return directions.get(visual_mode, directions["environmental_story"])
 
     def select_questions_from_echo_topic(self, local_date, generation_context):
         recent_text = " ".join(
@@ -1240,7 +1421,7 @@ class DailyFragmentGenerator:
             truncated = f"{truncated}."
         return self.ensure_single_question(truncated, "Which version still feels true?")
 
-    def repair_image_prompt(self, prompt, selected_lane="reconstruction", intimate=False):
+    def repair_image_prompt(self, prompt, selected_lane="reconstruction", intimate=False, visual_mode=""):
         value = re.sub(r"\s+", " ", str(prompt or "")).strip()
         if not value:
             return value
@@ -1288,6 +1469,9 @@ class DailyFragmentGenerator:
 
         if mentions_chloe:
             value += f" {self.emotion_prompt_clause(selected_lane, intimate=intimate)}"
+
+        if visual_mode:
+            value += f" Required composition: {self.visual_mode_direction(visual_mode, selected_lane)}"
 
         return value
 

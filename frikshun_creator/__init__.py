@@ -4,9 +4,11 @@ from dotenv import load_dotenv
 from datetime import datetime, timezone
 import json
 import click
+import logging
 import os
 import requests
 import secrets
+import time
 from datetime import timedelta
 
 from .db import close_session, configure_database, init_db
@@ -43,6 +45,7 @@ def create_app(config_overrides=None):
     load_dotenv(project_root / ".env")
 
     app = Flask(__name__, template_folder=str(project_root / "templates"))
+    logging.getLogger("frikshun_creator.services.daily_fragment_generator").setLevel(logging.INFO)
     app.config.from_prefixed_env()
     app.config.setdefault("DATABASE_URL", None)
     app.config.setdefault("AUTO_CREATE_TABLES", True)
@@ -53,8 +56,18 @@ def create_app(config_overrides=None):
         "CUSTOM_POST_PUBLISH_SYNC",
         os.getenv("CUSTOM_POST_PUBLISH_SYNC", "false").lower() == "true",
     )
-    app.config.setdefault("OPENAI_RATE_LIMIT_RETRIES", int(os.getenv("OPENAI_RATE_LIMIT_RETRIES", "8")))
+    app.config.setdefault(
+        "OPENAI_REQUEST_RETRIES",
+        int(os.getenv("OPENAI_REQUEST_RETRIES", os.getenv("OPENAI_RATE_LIMIT_RETRIES", "8"))),
+    )
+    app.config.setdefault("OPENAI_RATE_LIMIT_RETRIES", app.config["OPENAI_REQUEST_RETRIES"])
     app.config.setdefault("OPENAI_RATE_LIMIT_MAX_SLEEP_SECONDS", int(os.getenv("OPENAI_RATE_LIMIT_MAX_SLEEP_SECONDS", "60")))
+    app.config.setdefault("OPENAI_CONNECT_TIMEOUT_SECONDS", int(os.getenv("OPENAI_CONNECT_TIMEOUT_SECONDS", "10")))
+    app.config.setdefault("OPENAI_READ_TIMEOUT_SECONDS", int(os.getenv("OPENAI_READ_TIMEOUT_SECONDS", "300")))
+    app.config.setdefault(
+        "OPENAI_REASONING_READ_TIMEOUT_SECONDS",
+        int(os.getenv("OPENAI_REASONING_READ_TIMEOUT_SECONDS", "600")),
+    )
     app.config.setdefault("TIKTOK_REEL_VIDEO_PROVIDER", os.getenv("TIKTOK_REEL_VIDEO_PROVIDER", "animatic"))
     app.config.setdefault("FFMPEG_BIN", os.getenv("FFMPEG_BIN", "ffmpeg"))
     app.config.setdefault("FACEBOOK_TARGET_TYPE", os.getenv("FACEBOOK_TARGET_TYPE", "page"))
@@ -473,8 +486,13 @@ def create_app(config_overrides=None):
         else:
             generator = DailyFragmentGenerator(
                 app.config.get("UPLOAD_FOLDER"),
-                openai_rate_limit_retries=app.config.get("OPENAI_RATE_LIMIT_RETRIES", 8),
+                openai_rate_limit_retries=app.config.get("OPENAI_REQUEST_RETRIES", 8),
                 openai_rate_limit_max_sleep_seconds=app.config.get("OPENAI_RATE_LIMIT_MAX_SLEEP_SECONDS", 60),
+                openai_connect_timeout_seconds=app.config.get("OPENAI_CONNECT_TIMEOUT_SECONDS", 10),
+                openai_read_timeout_seconds=app.config.get("OPENAI_READ_TIMEOUT_SECONDS", 300),
+                openai_reasoning_read_timeout_seconds=app.config.get(
+                    "OPENAI_REASONING_READ_TIMEOUT_SECONDS", 600
+                ),
             )
             try:
                 package = generator.generate(
@@ -502,6 +520,71 @@ def create_app(config_overrides=None):
             click.echo(url)
         if errors:
             raise click.ClickException("; ".join(errors))
+
+    @app.cli.command("diagnose-daily-fragment-models")
+    @click.option(
+        "--local-date",
+        type=click.DateTime(formats=["%Y-%m-%d"]),
+        default=None,
+        help="Override the local day used to build the diagnostic prompt (YYYY-MM-DD).",
+    )
+    @click.option(
+        "--family",
+        type=click.Choice([name for name, _description in CONTENT_LANES]),
+        default=None,
+        help="Use one editorial family for both model requests.",
+    )
+    @click.option("--primary-model", default=None, help="Primary model; defaults to OPENAI_TEXT_MODEL.")
+    @click.option(
+        "--comparison-model",
+        default=None,
+        help="Comparison model; defaults to OPENAI_DIAGNOSTIC_MODEL or gpt-4.1-mini.",
+    )
+    def diagnose_daily_fragment_models_command(local_date, family, primary_model, comparison_model):
+        """Send the same daily-post prompt to two models without saving or publishing."""
+        from .db import get_session
+        from .services.generation_context import load_generation_context
+
+        session = get_session()
+        local_date = local_date.date() if local_date else datetime.now().astimezone().date()
+        CanonImporter(session).run()
+        generation_context = load_generation_context(session)
+        generator = DailyFragmentGenerator(
+            app.config.get("UPLOAD_FOLDER"),
+            openai_rate_limit_retries=app.config.get("OPENAI_REQUEST_RETRIES", 8),
+            openai_rate_limit_max_sleep_seconds=app.config.get("OPENAI_RATE_LIMIT_MAX_SLEEP_SECONDS", 60),
+            openai_connect_timeout_seconds=app.config.get("OPENAI_CONNECT_TIMEOUT_SECONDS", 10),
+            openai_read_timeout_seconds=app.config.get("OPENAI_READ_TIMEOUT_SECONDS", 300),
+            openai_reasoning_read_timeout_seconds=app.config.get(
+                "OPENAI_REASONING_READ_TIMEOUT_SECONDS", 600
+            ),
+        )
+        family = family or generator.select_content_lane(local_date, generation_context)
+        primary_model = primary_model or generator.text_model
+        comparison_model = comparison_model or os.getenv("OPENAI_DIAGNOSTIC_MODEL", "gpt-4.1-mini")
+        failures = []
+        for label, model in (("primary", primary_model), ("comparison", comparison_model)):
+            started_at = time.monotonic()
+            try:
+                plan = generator.generate_plan(
+                    local_date,
+                    generation_context,
+                    selected_lane=family,
+                    model=model,
+                )
+                click.echo(
+                    f"{label}: model={model} status=completed "
+                    f"duration_seconds={time.monotonic() - started_at:.3f} title={plan.title_suffix}"
+                )
+            except Exception as error:
+                failures.append(f"{label} ({model}): {type(error).__name__}: {error}")
+                click.echo(
+                    f"{label}: model={model} status=failed "
+                    f"duration_seconds={time.monotonic() - started_at:.3f} "
+                    f"error_type={type(error).__name__}"
+                )
+        if failures:
+            raise click.ClickException("; ".join(failures))
 
     @app.cli.command("generate-daily-fragment-run")
     @click.option(
@@ -542,8 +625,13 @@ def create_app(config_overrides=None):
 
         generator = DailyFragmentGenerator(
             app.config.get("UPLOAD_FOLDER"),
-            openai_rate_limit_retries=app.config.get("OPENAI_RATE_LIMIT_RETRIES", 8),
+            openai_rate_limit_retries=app.config.get("OPENAI_REQUEST_RETRIES", 8),
             openai_rate_limit_max_sleep_seconds=app.config.get("OPENAI_RATE_LIMIT_MAX_SLEEP_SECONDS", 60),
+            openai_connect_timeout_seconds=app.config.get("OPENAI_CONNECT_TIMEOUT_SECONDS", 10),
+            openai_read_timeout_seconds=app.config.get("OPENAI_READ_TIMEOUT_SECONDS", 300),
+            openai_reasoning_read_timeout_seconds=app.config.get(
+                "OPENAI_REASONING_READ_TIMEOUT_SECONDS", 600
+            ),
         )
         try:
             package = generator.generate(

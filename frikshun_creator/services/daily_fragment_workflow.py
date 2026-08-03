@@ -27,6 +27,8 @@ class DailyFragmentPackage:
     generation_warnings: list[str] = field(default_factory=list)
     public_image_prompt: str = ""
     fanvue_image_prompt: str = ""
+    content_lane: str = ""
+    visual_mode: str = ""
 
 
 def default_daily_fragment_run_id(now=None):
@@ -58,6 +60,8 @@ def package_from_existing_artifact(artifact):
         generation_warnings=list(metadata.get("generation_warnings") or []),
         public_image_prompt=str(metadata.get("public_image_prompt") or ""),
         fanvue_image_prompt=str(metadata.get("fanvue_image_prompt") or ""),
+        content_lane=str(metadata.get("content_lane") or ""),
+        visual_mode=str(metadata.get("visual_mode") or ""),
     )
 
 
@@ -83,6 +87,8 @@ def store_daily_fragment_package(session, package, local_date, run_id=None):
             "generation_warnings": list(package.generation_warnings or []),
             "public_image_prompt": package.public_image_prompt,
             "fanvue_image_prompt": package.fanvue_image_prompt,
+            "content_lane": package.content_lane,
+            "visual_mode": package.visual_mode,
         }
     )
     if artifact is None:
@@ -111,6 +117,15 @@ def store_daily_fragment_package(session, package, local_date, run_id=None):
     artifact.platform_tags = ["facebook", "instagram", "threads", "x", "fanvue"]
     session.flush()
 
+    catalog_entry_id = str(metadata.get("catalog_entry_id") or "").strip()
+    if "recovered-fragment" in (package.content_tags or []):
+        catalog_entry_id = catalog_entry_id or f"CK-{artifact.id:06d}"
+        metadata = {**metadata, "catalog_entry_id": catalog_entry_id}
+    else:
+        metadata = {key: value for key, value in metadata.items() if key != "catalog_entry_id"}
+        catalog_entry_id = ""
+    artifact.generated_metadata = metadata
+
     drafts = {draft.platform: draft for draft in artifact.post_drafts}
     platform_bodies = {
         "facebook": package.body.strip(),
@@ -119,6 +134,11 @@ def store_daily_fragment_package(session, package, local_date, run_id=None):
         "x": package.x_body.strip(),
         "fanvue": package.fanvue_body.strip(),
     }
+    if catalog_entry_id:
+        platform_bodies = {
+            platform: prepend_recovered_catalog_marker(body, catalog_entry_id, platform)
+            for platform, body in platform_bodies.items()
+        }
     for platform in ("facebook", "instagram", "threads", "x", "fanvue"):
         if platform not in drafts:
             drafts[platform] = PostDraft(
@@ -135,6 +155,31 @@ def store_daily_fragment_package(session, package, local_date, run_id=None):
             drafts[platform].caption = platform_bodies[platform]
     session.commit()
     return artifact, run_id
+
+
+def prepend_recovered_catalog_marker(body, catalog_entry_id, platform):
+    marker = f"[Recovered Memory · {catalog_entry_id}]"
+    body = str(body or "").strip()
+    if marker in body:
+        return body
+    combined = f"{marker}\n\n{body}".strip()
+    if platform != "x" or len(combined) <= 280:
+        return combined
+
+    available = 280 - len(marker) - 2
+    hashtags = ""
+    main = body
+    if "\n\n#" in body:
+        main, hashtags = body.rsplit("\n\n", 1)
+    if hashtags:
+        available -= len(hashtags) + 2
+    shortened = main[: max(0, available - 1)].rstrip()
+    if len(shortened) < len(main):
+        shortened = f"{shortened}…"
+    parts = [marker, shortened]
+    if hashtags:
+        parts.append(hashtags)
+    return "\n\n".join(part for part in parts if part).strip()
 
 
 def publish_daily_fragment_package(session, config, package, local_date, run_id=None, allow_dry_run=False):

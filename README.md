@@ -143,6 +143,16 @@ flask --app app run-daily-fragment-autopilot --run-id friday-evening-retry
 
 Use this command for the normal scheduled autopilot path. Keep `publish-daily-fragment` for cases where you already have specific text or images that need custom attention.
 
+Diagnose model-specific latency without saving an artifact, generating images, or publishing. The command sends the same daily-post prompt to both models and reports each duration; request telemetry in the application log includes the endpoint, model, attempt, HTTP status, `x-request-id`, client request id, duration, and whether a timeout occurred before response headers or while reading the response body:
+
+```sh
+flask --app app diagnose-daily-fragment-models \
+  --primary-model gpt-4.1 \
+  --comparison-model gpt-4.1-mini
+```
+
+Responses API hardening is configurable with `OPENAI_REQUEST_RETRIES`, `OPENAI_RATE_LIMIT_MAX_SLEEP_SECONDS`, `OPENAI_CONNECT_TIMEOUT_SECONDS`, `OPENAI_READ_TIMEOUT_SECONDS`, and `OPENAI_REASONING_READ_TIMEOUT_SECONDS`. The legacy `OPENAI_RATE_LIMIT_RETRIES` setting remains a fallback for compatibility.
+
 Publish one recovered fragment across all connected platforms:
 
 ```sh

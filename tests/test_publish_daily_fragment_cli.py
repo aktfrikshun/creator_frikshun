@@ -109,6 +109,15 @@ class PublishDailyFragmentCliTest(unittest.TestCase):
             self.assertEqual("Recovered Fragment — Override", artifact.title)
             self.assertEqual("2026-07-20", artifact.generated_metadata["local_date"])
             self.assertEqual("demo-run-1", artifact.generated_metadata["run_id"])
+            self.assertEqual(f"CK-{artifact.id:06d}", artifact.generated_metadata["catalog_entry_id"])
+            for draft in artifact.post_drafts:
+                self.assertTrue(
+                    draft.caption.startswith(
+                        f"[Recovered Memory · {artifact.generated_metadata['catalog_entry_id']}]"
+                    )
+                )
+            x_draft = next(draft for draft in artifact.post_drafts if draft.platform == "x")
+            self.assertLessEqual(len(x_draft.caption), 280)
 
     def test_repeated_run_id_skips_already_published_platforms(self):
         with self.publisher_patches()[0], self.publisher_patches()[1], self.publisher_patches()[2], \

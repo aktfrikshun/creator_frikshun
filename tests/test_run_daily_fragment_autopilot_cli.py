@@ -124,6 +124,39 @@ class RunDailyFragmentAutopilotCliTest(unittest.TestCase):
             artifact = session.query(Artifact).filter_by(fragment_code="daily-fragment-run-saved-run").one_or_none()
             self.assertIsNotNone(artifact)
 
+    def test_diagnostic_command_sends_same_context_to_two_models_without_publishing(self):
+        primary_plan = Mock(title_suffix="Primary Result")
+        comparison_plan = Mock(title_suffix="Comparison Result")
+        with patch("frikshun_creator.CanonImporter.run"), \
+            patch(
+                "frikshun_creator.DailyFragmentGenerator.generate_plan",
+                side_effect=[primary_plan, comparison_plan],
+            ) as generate_plan, \
+            patch(
+                "frikshun_creator.publish_daily_fragment_package",
+                side_effect=AssertionError("diagnostics must not publish"),
+            ):
+            result = self.runner.invoke(
+                args=[
+                    "diagnose-daily-fragment-models",
+                    "--local-date", "2026-07-31",
+                    "--family", "lifestyle",
+                    "--primary-model", "primary-model",
+                    "--comparison-model", "comparison-model",
+                ]
+            )
+
+        self.assertEqual(0, result.exit_code, result.output)
+        self.assertIn("primary: model=primary-model status=completed", result.output)
+        self.assertIn("comparison: model=comparison-model status=completed", result.output)
+        self.assertEqual(2, generate_plan.call_count)
+        first = generate_plan.call_args_list[0]
+        second = generate_plan.call_args_list[1]
+        self.assertEqual(first.args[:2], second.args[:2])
+        self.assertEqual(first.kwargs["selected_lane"], second.kwargs["selected_lane"])
+        self.assertEqual("primary-model", first.kwargs["model"])
+        self.assertEqual("comparison-model", second.kwargs["model"])
+
     def test_publish_daily_fragment_run_uses_saved_artifact(self):
         with self.app.app_context():
             session = get_session()

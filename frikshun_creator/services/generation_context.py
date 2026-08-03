@@ -3,10 +3,13 @@ from ..models import Artifact, CanonEntry, PostDraft
 
 
 class GenerationContext:
-    def __init__(self, canon_entries=None, recent_posts=None, review_feedback=None):
+    def __init__(self, canon_entries=None, recent_posts=None, review_feedback=None, recent_content_lanes=None, recent_visual_modes=None, recent_image_prompts=None):
         self.canon_entries = canon_entries or []
         self.recent_posts = recent_posts or []
         self.review_feedback = review_feedback or []
+        self.recent_content_lanes = recent_content_lanes or []
+        self.recent_visual_modes = recent_visual_modes or []
+        self.recent_image_prompts = recent_image_prompts or []
 
     @property
     def canon_excerpt(self):
@@ -140,10 +143,55 @@ def load_generation_context(session):
         .all()
     )
     review_feedback = []
+    recent_content_lanes = []
+    recent_visual_modes = []
+    recent_image_prompts = []
     for artifact in reversed(reviewed_artifacts):
         review_feedback.extend(list((artifact.generated_metadata or {}).get("review_feedback") or []))
+    for artifact in reviewed_artifacts:
+        metadata = artifact.generated_metadata or {}
+        lane = str(metadata.get("content_lane") or "").strip()
+        if not lane:
+            tags = set(artifact.content_tags or [])
+            lane = next(
+                (
+                    candidate
+                    for candidate, marker in (
+                        ("reconstruction", "recovered-fragment"),
+                        ("philosophy", "questions-from-the-echo"),
+                        ("lifestyle", "lifestyle"),
+                        ("music", "music"),
+                        ("travel", "travel"),
+                        ("craft", "craft"),
+                        ("fantasy_art", "fantasy-art"),
+                    )
+                    if marker in tags
+                ),
+                "",
+            )
+        if lane and lane not in recent_content_lanes:
+            recent_content_lanes.append(lane)
+        image_prompt = str(metadata.get("public_image_prompt") or "").strip()
+        visual_mode = str(metadata.get("visual_mode") or "").strip()
+        if not visual_mode and image_prompt:
+            prompt = image_prompt.casefold()
+            if any(marker in prompt for marker in ("painting", "watercolor", "charcoal", "collage", "mixed media", "ink drawing", "concept art")):
+                visual_mode = "fine_art"
+            elif any(marker in prompt for marker in ("full-body", "full body", "head-to-toe", "running", "dancing", "swimming", "walking", "performing")):
+                visual_mode = "full_body_action"
+            elif any(marker in prompt for marker in ("wide shot", "environmental", "landscape", "cityscape", "interior scene")):
+                visual_mode = "environmental_story"
+            elif any(marker in prompt for marker in ("portrait", "close-up", "headshot", "mirror", "reflection", "duplicate", "echo")):
+                visual_mode = "portrait"
+        if visual_mode and visual_mode not in recent_visual_modes:
+            recent_visual_modes.append(visual_mode)
+        if image_prompt:
+            recent_image_prompts.append(image_prompt[:500])
     return GenerationContext(
         canon_entries=canon_entries,
         recent_posts=recent_posts,
         review_feedback=review_feedback,
+        recent_content_lanes=recent_content_lanes,
+        recent_visual_modes=recent_visual_modes,
+        recent_image_prompts=recent_image_prompts[:6],
     )

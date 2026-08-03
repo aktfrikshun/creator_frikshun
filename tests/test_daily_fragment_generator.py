@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, PropertyMock, patch
 import requests
 from PIL import Image
 
@@ -98,7 +98,11 @@ class DailyFragmentGeneratorTest(unittest.TestCase):
                     image_model="image-model",
                     api_key="test-key",
                     chloe_reference_image=reference,
-                ).generate(local_date=date(2026, 7, 20), generation_context=GenerationContext())
+                ).generate(
+                    local_date=date(2026, 7, 20),
+                    generation_context=GenerationContext(),
+                    selected_lane="reconstruction",
+                )
 
             self.assertEqual("Recovered Fragment — Borrowed Reflections", package.title)
             self.assertNotIn("Learn more about me", package.body)
@@ -110,6 +114,7 @@ class DailyFragmentGeneratorTest(unittest.TestCase):
             self.assertIn("#Identity", package.x_body)
             self.assertEqual(1, package.body.count("?"))
             self.assertEqual(["recovered-fragment", "identity", "echo-traversal"], package.content_tags)
+            self.assertEqual("reconstruction", package.content_lane)
             self.assertTrue(package.public_image_path.exists())
             self.assertTrue(package.fanvue_image_path.exists())
             self.assertEqual(b"public-image", package.public_image_path.read_bytes())
@@ -183,7 +188,11 @@ class DailyFragmentGeneratorTest(unittest.TestCase):
                     text_model="text-model",
                     image_model="image-model",
                     api_key="test-key",
-                ).generate(local_date=date(2026, 7, 17), generation_context=GenerationContext())
+                ).generate(
+                    local_date=date(2026, 7, 17),
+                    generation_context=GenerationContext(),
+                    selected_lane="reconstruction",
+                )
 
             self.assertEqual("Recovered Fragment — Borrowed Reflections", package.title)
             self.assertEqual(3, post.call_count)
@@ -233,6 +242,88 @@ class DailyFragmentGeneratorTest(unittest.TestCase):
             self.assertEqual("Borrowed Reflections", plan.title_suffix)
             self.assertEqual(2, post.call_count)
             sleep.assert_called_once_with(1)
+
+    def test_request_timeout_is_longer_for_reasoning_models(self):
+        generator = DailyFragmentGenerator(
+            "/tmp",
+            api_key="test-key",
+            openai_connect_timeout_seconds=7,
+            openai_read_timeout_seconds=120,
+            openai_reasoning_read_timeout_seconds=480,
+        )
+
+        self.assertEqual((7, 120), generator.openai_request_timeout("gpt-4.1"))
+        self.assertEqual((7, 480), generator.openai_request_timeout("gpt-5.4"))
+
+    def test_retries_timeout_before_response_with_exponential_jitter(self):
+        successful = self.json_response({"output_text": "{}"})
+        successful.status_code = 200
+        successful.headers = {"x-request-id": "req-success"}
+        generator = DailyFragmentGenerator(
+            "/tmp",
+            api_key="test-key",
+            openai_rate_limit_retries=1,
+        )
+
+        with patch(
+            "frikshun_creator.services.daily_fragment_generator.requests.post",
+            side_effect=[requests.ReadTimeout("no headers"), successful],
+        ) as post, patch(
+            "frikshun_creator.services.daily_fragment_generator.random.uniform",
+            return_value=0.375,
+        ) as jitter, patch(
+            "frikshun_creator.services.daily_fragment_generator.time.sleep"
+        ) as sleep, self.assertLogs(
+            "frikshun_creator.services.daily_fragment_generator", level="INFO"
+        ) as logs:
+            result = generator.post_with_rate_limit_retry(
+                "https://api.openai.com/v1/responses",
+                headers={},
+                json={"model": "gpt-4.1"},
+                timeout=(10, 300),
+            )
+
+        self.assertIs(successful, result)
+        self.assertEqual(2, post.call_count)
+        self.assertTrue(post.call_args.kwargs["stream"])
+        jitter.assert_called_once_with(0, 1)
+        sleep.assert_called_once_with(0.375)
+        self.assertIn('"phase": "before_response"', logs.output[0])
+        self.assertIn('"x_request_id": "req-success"', logs.output[1])
+
+    def test_retries_timeout_while_reading_response_body(self):
+        stalled = Mock(status_code=200, headers={"x-request-id": "req-stalled"})
+        type(stalled).content = PropertyMock(side_effect=requests.ReadTimeout("body stalled"))
+        successful = self.json_response({"output_text": "{}"})
+        successful.status_code = 200
+        successful.headers = {"x-request-id": "req-success"}
+        generator = DailyFragmentGenerator(
+            "/tmp",
+            api_key="test-key",
+            openai_rate_limit_retries=1,
+        )
+
+        with patch(
+            "frikshun_creator.services.daily_fragment_generator.requests.post",
+            side_effect=[stalled, successful],
+        ), patch(
+            "frikshun_creator.services.daily_fragment_generator.random.uniform",
+            return_value=0,
+        ), patch(
+            "frikshun_creator.services.daily_fragment_generator.time.sleep"
+        ), self.assertLogs(
+            "frikshun_creator.services.daily_fragment_generator", level="INFO"
+        ) as logs:
+            result = generator.post_with_rate_limit_retry(
+                "https://api.openai.com/v1/responses",
+                headers={},
+                json={"model": "gpt-4.1"},
+                timeout=(10, 300),
+            )
+
+        self.assertIs(successful, result)
+        self.assertIn('"phase": "response_body"', logs.output[0])
+        self.assertIn('"x_request_id": "req-stalled"', logs.output[0])
 
     def test_title_prefix_and_tags_follow_lane(self):
         generator = DailyFragmentGenerator("/tmp", api_key="test-key")
@@ -517,10 +608,53 @@ class DailyFragmentGeneratorTest(unittest.TestCase):
         self.assertIn("Visual generation rule: Chloe may be depicted only if the prompt stays faithful", prompt)
         self.assertIn("Visual canon guidance:", prompt)
         self.assertIn("Use this required content lane today: lifestyle.", prompt)
+        self.assertIn("Required visual mode today:", prompt)
+        self.assertIn("mirrors, reflective-glass portraits, duplicate Chloes", prompt)
         self.assertIn("full of wonder and excitement at discovering new things", prompt.lower())
         self.assertIn("enthusiastic, flirty, fierce, curious, and engaging", prompt.lower())
         self.assertIn("avoid moody, brooding, elegiac, mournful, haunted", prompt.lower())
         self.assertIn("do not make her look sad, stoic, blank, or emotionally shut down", prompt.lower())
+
+    def test_visual_mode_rotation_excludes_recent_modes(self):
+        generator = DailyFragmentGenerator("/tmp", api_key="test-key")
+        context = GenerationContext(
+            recent_visual_modes=["portrait", "environmental_story"],
+        )
+
+        with patch(
+            "frikshun_creator.services.daily_fragment_generator.random.choice",
+            return_value="full_body_action",
+        ) as choice:
+            selected = generator.select_visual_mode(context, "lifestyle")
+
+        self.assertEqual("full_body_action", selected)
+        self.assertEqual(["full_body_action", "fine_art"], choice.call_args.args[0])
+
+    def test_visual_mode_without_history_prioritizes_non_portrait_compositions(self):
+        generator = DailyFragmentGenerator("/tmp", api_key="test-key")
+
+        with patch(
+            "frikshun_creator.services.daily_fragment_generator.random.choice",
+            return_value="fine_art",
+        ) as choice:
+            selected = generator.select_visual_mode(GenerationContext(), "music")
+
+        self.assertEqual("fine_art", selected)
+        self.assertNotIn("portrait", choice.call_args.args[0])
+
+    def test_full_body_visual_mode_repairs_prompt_with_action_composition(self):
+        generator = DailyFragmentGenerator("/tmp", api_key="test-key")
+
+        repaired = generator.repair_image_prompt(
+            "Chloe tuning a guitar before rehearsal.",
+            selected_lane="music",
+            intimate=False,
+            visual_mode="full_body_action",
+        )
+
+        self.assertIn("dynamic head-to-toe composition", repaired)
+        self.assertIn("motion, gesture, spatial depth", repaired)
+        self.assertIn("avoid mirrors and duplicate figures", repaired)
 
     def test_emotion_guidance_includes_wonder(self):
         generator = DailyFragmentGenerator("/tmp", api_key="test-key")
@@ -539,19 +673,44 @@ class DailyFragmentGeneratorTest(unittest.TestCase):
 
     def test_select_content_lane_avoids_recent_duplicate_lanes(self):
         context = GenerationContext(
+            recent_content_lanes=["philosophy", "craft", "travel"],
+        )
+
+        with patch(
+            "frikshun_creator.services.daily_fragment_generator.random.choice",
+            return_value="fantasy_art",
+        ) as choice:
+            lane = DailyFragmentGenerator("/tmp", api_key="test-key").select_content_lane(
+                local_date=date(2026, 7, 17),
+                generation_context=context,
+            )
+
+        self.assertEqual("fantasy_art", lane)
+        self.assertEqual(
+            ["reconstruction", "lifestyle", "music", "fantasy_art"],
+            choice.call_args.args[0],
+        )
+
+    def test_select_content_lane_falls_back_to_caption_history(self):
+        context = GenerationContext(
             recent_posts=[
                 PostDraft(caption="A camera, lens, and styling note from tonight's shoot."),
                 PostDraft(caption="A hotel room, a late train, and a city that refused to sleep."),
             ]
         )
 
-        lane = DailyFragmentGenerator("/tmp", api_key="test-key").select_content_lane(
-            local_date=date(2026, 7, 17),
-            generation_context=context,
-        )
+        with patch(
+            "frikshun_creator.services.daily_fragment_generator.random.choice",
+            return_value="music",
+        ) as choice:
+            lane = DailyFragmentGenerator("/tmp", api_key="test-key").select_content_lane(
+                local_date=date(2026, 7, 17),
+                generation_context=context,
+            )
 
-        self.assertEqual("fantasy_art", lane)
-        self.assertIn(lane, {name for name, _description in CONTENT_LANES})
+        self.assertEqual("music", lane)
+        self.assertNotIn("craft", choice.call_args.args[0])
+        self.assertNotIn("travel", choice.call_args.args[0])
 
     def test_classify_recent_caption_lane_detects_lifestyle(self):
         lane = DailyFragmentGenerator("/tmp", api_key="test-key").classify_recent_caption_lane(
