@@ -1,0 +1,18 @@
+{% extends "legal/base.html" %}
+{% block title %}Fan Fragment Inbox | Creator OS{% endblock %}
+{% block content %}
+  <h1>Fan Fragment Inbox</h1>
+  <p>Sanitized contributions accepted by FrikFan. Staging is not publication or canon.</p>
+  {% if ingestions %}
+    <ul>
+      {% for item in ingestions %}
+        <li>
+          <a href="{{ url_for('creator.fan_fragment_inbox_show', ingestion_id=item.ingestion_id) }}">{{ item.title }}</a>
+          — {{ item.classification }} · {{ item.status }} · {{ item.source_submission_id }}
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p>No fan fragments are staged.</p>
+  {% endif %}
+{% endblock %}

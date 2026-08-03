@@ -378,3 +378,52 @@ class ChloeChatMessage(Base):
     role: Mapped[str] = mapped_column(String(40), nullable=False)
     body: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class FanFragmentIngestion(Base):
+    __tablename__ = "creator_fan_fragment_ingestions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ingestion_id: Mapped[str] = mapped_column(String(80), nullable=False, unique=True)
+    source_submission_id: Mapped[str] = mapped_column(String(80), nullable=False, unique=True)
+    idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False, unique=True)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    classification: Mapped[str] = mapped_column(String(80), nullable=False)
+    title: Mapped[str] = mapped_column(String(240), nullable=False)
+    candidate_text: Mapped[str] = mapped_column(Text, default="")
+    provenance_summary: Mapped[str] = mapped_column(Text, default="")
+    source_urls: Mapped[list] = mapped_column(JSON, default=list)
+    attribution: Mapped[dict] = mapped_column(JSON, default=dict)
+    attachment_manifest: Mapped[list] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(80), default="staged")
+    imported_artifact_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("creator_artifacts.id"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    media: Mapped[List["FanFragmentMedia"]] = relationship(
+        back_populates="ingestion", cascade="all, delete-orphan"
+    )
+    imported_artifact: Mapped[Optional[Artifact]] = relationship()
+
+
+class FanFragmentMedia(Base):
+    __tablename__ = "creator_fan_fragment_media"
+    __table_args__ = (
+        UniqueConstraint("fan_fragment_ingestion_id", "media_id", name="uq_fan_fragment_media"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    fan_fragment_ingestion_id: Mapped[int] = mapped_column(
+        ForeignKey("creator_fan_fragment_ingestions.id"), nullable=False
+    )
+    media_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    filename: Mapped[str] = mapped_column(String(500), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(160), nullable=False)
+    byte_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    checksum_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    storage_path: Mapped[str] = mapped_column(String(1000), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    ingestion: Mapped[FanFragmentIngestion] = relationship(back_populates="media")

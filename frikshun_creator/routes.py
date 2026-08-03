@@ -26,6 +26,7 @@ from .models import (
     PostMetricSnapshot,
     PostPublication,
     RemoteContent,
+    FanFragmentIngestion,
 )
 from .publishers import FacebookAdapter, InstagramAdapter, ThreadsAdapter, XAdapter, FanvueAdapter
 from .services.canon_importer import CanonImporter
@@ -39,6 +40,14 @@ from .services.google_oauth import GoogleOAuth
 from .services.fanvue_oauth import FanvueOAuth
 from .services.media_analyzer import MediaAnalyzer
 from .services.metadata_generator import ArtifactMetadataGenerator
+from .services.fan_fragment_ingestion import (
+    EnvelopeError,
+    MAX_ENVELOPE_BYTES,
+    authorized_request,
+    build_ingestion,
+    store_uploaded_media,
+    validate_envelope,
+)
 from .services.post_metrics import PostMetricsPoller, latest_snapshot_by_publication
 from .services.post_media import artifact_media_items
 from .services.post_preview import apply_review_form, platform_summary
@@ -83,6 +92,8 @@ PUBLIC_ENDPOINTS = {
     "creator.tiktok_oauth_callback",
     "creator.fanvue_oauth_callback",
     "creator.threads_oauth_callback",
+    "creator.ingest_fan_fragment",
+    "creator.upload_fan_fragment_media",
 }
 
 
@@ -183,6 +194,194 @@ def privacy():
 @bp.get("/acceptable-use")
 def acceptable_use():
     return render_template("legal/acceptable_use.html")
+
+
+def fan_fragment_api_error(message, status):
+    return {"error": message, "request_id": request.headers.get("X-Request-ID", "")}, status
+
+
+@bp.post("/api/v1/intake/fan-fragments")
+def ingest_fan_fragment():
+    if not authorized_request(request.headers.get("Authorization")):
+        return fan_fragment_api_error("Unauthorized.", 401)
+    if request.content_length and request.content_length > MAX_ENVELOPE_BYTES:
+        return fan_fragment_api_error("Request body is too large.", 413)
+    idempotency_key = request.headers.get("Idempotency-Key", "").strip()
+    if not idempotency_key or len(idempotency_key) > 160:
+        return fan_fragment_api_error("A valid Idempotency-Key header is required.", 422)
+    try:
+        validated = validate_envelope(request.get_json(silent=True))
+    except EnvelopeError as error:
+        return fan_fragment_api_error(str(error), 422)
+    db_session = get_session()
+    existing = (
+        db_session.query(FanFragmentIngestion)
+        .filter(FanFragmentIngestion.idempotency_key == idempotency_key)
+        .first()
+    )
+    if existing:
+        if existing.source_submission_id != validated["source_submission_id"]:
+            return fan_fragment_api_error("Idempotency key conflicts with another submission.", 409)
+        return {
+            "ingestion_id": existing.ingestion_id,
+            "source_submission_id": existing.source_submission_id,
+            "status": existing.status,
+        }, 202
+    source_existing = (
+        db_session.query(FanFragmentIngestion)
+        .filter(FanFragmentIngestion.source_submission_id == validated["source_submission_id"])
+        .first()
+    )
+    if source_existing:
+        return fan_fragment_api_error("Source submission was already ingested.", 409)
+    ingestion = build_ingestion(validated, idempotency_key)
+    db_session.add(ingestion)
+    db_session.commit()
+    return {
+        "ingestion_id": ingestion.ingestion_id,
+        "source_submission_id": ingestion.source_submission_id,
+        "status": ingestion.status,
+    }, 202
+
+
+@bp.post("/api/v1/intake/fan-fragments/<ingestion_id>/media/<media_id>")
+def upload_fan_fragment_media(ingestion_id, media_id):
+    if not authorized_request(request.headers.get("Authorization")):
+        return fan_fragment_api_error("Unauthorized.", 401)
+    db_session = get_session()
+    ingestion = (
+        db_session.query(FanFragmentIngestion)
+        .filter(FanFragmentIngestion.ingestion_id == ingestion_id)
+        .first()
+    )
+    if not ingestion:
+        return fan_fragment_api_error("Ingestion not found.", 404)
+    expected = next(
+        (item for item in (ingestion.attachment_manifest or []) if item["media_id"] == media_id),
+        None,
+    )
+    if not expected:
+        return fan_fragment_api_error("Media is not present in the ingestion manifest.", 404)
+    try:
+        medium, created = store_uploaded_media(
+            db_session, ingestion, expected, request.files.get("media")
+        )
+        db_session.commit()
+    except EnvelopeError as error:
+        db_session.rollback()
+        return fan_fragment_api_error(str(error), 422)
+    return {
+        "ingestion_id": ingestion.ingestion_id,
+        "media_id": medium.media_id,
+        "status": ingestion.status,
+    }, 201 if created else 200
+
+
+@bp.get("/fan-fragment-inbox")
+def fan_fragment_inbox():
+    ingestions = (
+        get_session()
+        .query(FanFragmentIngestion)
+        .order_by(FanFragmentIngestion.created_at.desc())
+        .all()
+    )
+    return render_template("fan_fragment_inbox.html", ingestions=ingestions)
+
+
+@bp.get("/fan-fragment-inbox/<ingestion_id>")
+def fan_fragment_inbox_show(ingestion_id):
+    ingestion = (
+        get_session()
+        .query(FanFragmentIngestion)
+        .filter(FanFragmentIngestion.ingestion_id == ingestion_id)
+        .first()
+    )
+    if not ingestion:
+        abort(404)
+    return render_template("fan_fragment_inbox_show.html", ingestion=ingestion)
+
+
+@bp.get("/fan-fragment-inbox/<ingestion_id>/media/<media_id>")
+def fan_fragment_inbox_media(ingestion_id, media_id):
+    ingestion = (
+        get_session()
+        .query(FanFragmentIngestion)
+        .filter(FanFragmentIngestion.ingestion_id == ingestion_id)
+        .first()
+    )
+    if not ingestion:
+        abort(404)
+    medium = next((item for item in ingestion.media if item.media_id == media_id), None)
+    if not medium or not Path(medium.storage_path).is_file():
+        abort(404)
+    return send_file(
+        medium.storage_path,
+        mimetype=medium.content_type,
+        as_attachment=True,
+        download_name=medium.filename,
+    )
+
+
+@bp.post("/fan-fragment-inbox/<ingestion_id>/import")
+def import_fan_fragment(ingestion_id):
+    db_session = get_session()
+    ingestion = (
+        db_session.query(FanFragmentIngestion)
+        .filter(FanFragmentIngestion.ingestion_id == ingestion_id)
+        .first()
+    )
+    if not ingestion:
+        abort(404)
+    if ingestion.imported_artifact_id:
+        flash("This contribution was already imported.", "error")
+        return redirect(url_for("creator.fan_fragment_inbox_show", ingestion_id=ingestion_id))
+    if ingestion.status != "staged":
+        flash("All manifested media must arrive before import.", "error")
+        return redirect(url_for("creator.fan_fragment_inbox_show", ingestion_id=ingestion_id))
+    media = list(ingestion.media)
+    primary = media[0] if media else None
+    artifact = Artifact(
+        title=ingestion.title,
+        artifact_type=(primary.content_type.split("/", 1)[0] if primary else "text"),
+        summary=ingestion.candidate_text,
+        lore_text="",
+        visibility="private",
+        canonical_status="proposed_artifact",
+        source_notes=(
+            f"Fan contribution {ingestion.source_submission_id}; "
+            f"Creator ingestion {ingestion.ingestion_id}. {ingestion.provenance_summary}"
+        ),
+        original_filename=primary.filename if primary else "",
+        media_path=primary.storage_path if primary else "",
+        media_content_type=primary.content_type if primary else "",
+        media_size=primary.byte_size if primary else 0,
+        generated_metadata={
+            "workflow": "fan_fragment_ingestion_v1",
+            "source_submission_id": ingestion.source_submission_id,
+            "ingestion_id": ingestion.ingestion_id,
+            "classification": ingestion.classification,
+            "attribution": ingestion.attribution,
+            "source_urls": ingestion.source_urls,
+            "additional_media": [
+                {
+                    "media_path": item.storage_path,
+                    "media_content_type": item.content_type,
+                    "original_filename": item.filename,
+                    "media_size": item.byte_size,
+                    "checksum_sha256": item.checksum_sha256,
+                }
+                for item in media[1:]
+            ],
+        },
+        content_tags=["fan-contribution", ingestion.classification],
+    )
+    db_session.add(artifact)
+    db_session.flush()
+    ingestion.imported_artifact_id = artifact.id
+    ingestion.status = "imported"
+    db_session.commit()
+    flash("Created a private proposed artifact for review.", "success")
+    return redirect(url_for("creator.fan_fragment_inbox_show", ingestion_id=ingestion_id))
 
 
 def daily_post_family(artifact):

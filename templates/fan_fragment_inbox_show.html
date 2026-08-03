@@ -1,0 +1,21 @@
+{% extends "legal/base.html" %}
+{% block title %}{{ ingestion.title }} | Fan Fragment Inbox{% endblock %}
+{% block content %}
+  <p><a href="{{ url_for('creator.fan_fragment_inbox') }}">← Fan Fragment Inbox</a></p>
+  <h1>{{ ingestion.title }}</h1>
+  <dl>
+    <dt>Source</dt><dd>{{ ingestion.source_submission_id }}</dd>
+    <dt>Classification</dt><dd>{{ ingestion.classification }}</dd>
+    <dt>Status</dt><dd>{{ ingestion.status }}</dd>
+    <dt>Attribution</dt><dd>{{ ingestion.attribution.get('display_name') or 'Anonymous' }}</dd>
+  </dl>
+  {% if ingestion.candidate_text %}<h2>Candidate fragment</h2><p>{{ ingestion.candidate_text }}</p>{% endif %}
+  {% if ingestion.provenance_summary %}<h2>Provenance</h2><p>{{ ingestion.provenance_summary }}</p>{% endif %}
+  {% if ingestion.source_urls %}<h2>Sources</h2><ul>{% for source in ingestion.source_urls %}<li><a href="{{ source }}">{{ source }}</a></li>{% endfor %}</ul>{% endif %}
+  {% if ingestion.media %}<h2>Media</h2><ul>{% for medium in ingestion.media %}<li><a href="{{ url_for('creator.fan_fragment_inbox_media', ingestion_id=ingestion.ingestion_id, media_id=medium.media_id) }}">{{ medium.filename }}</a> ({{ medium.content_type }})</li>{% endfor %}</ul>{% endif %}
+  {% if ingestion.imported_artifact_id %}
+    <p>Imported as proposed artifact #{{ ingestion.imported_artifact_id }}.</p>
+  {% elif ingestion.status == 'staged' %}
+    <form method="post" action="{{ url_for('creator.import_fan_fragment', ingestion_id=ingestion.ingestion_id) }}"><button type="submit">Create proposed artifact</button></form>
+  {% endif %}
+{% endblock %}
