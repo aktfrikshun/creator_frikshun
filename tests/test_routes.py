@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from frikshun_creator import create_app
 from frikshun_creator.db import get_session
 from frikshun_creator.models import (
-    Artifact, EngagementSenderPolicy, MetricsPollRun, PostDraft, PostInteraction, PostMetricSnapshot, PostPublication
+    Artifact, CanonEntry, EngagementSenderPolicy, MetricsPollRun, PostDraft, PostInteraction, PostMetricSnapshot, PostPublication
 )
 
 
@@ -24,6 +24,7 @@ class RoutesTest(unittest.TestCase):
                 "DATABASE_URL": "sqlite+pysqlite:///:memory:",
                 "AUTO_CREATE_TABLES": True,
                 "UPLOAD_FOLDER": self.uploads.name,
+                "CHLOE_MARKETING_ARCHIVE_ROOT": f"{self.uploads.name}/marketing-archive",
                 "MEDIA_ANALYZER_PROVIDER": "local",
                 "CUSTOM_POST_PUBLISH_SYNC": True,
                 "THREADS_APP_ID": "threads-app",
@@ -1295,6 +1296,76 @@ class RoutesTest(unittest.TestCase):
             self.assertTrue(policy.blocked)
             self.assertFalse(policy.auto_approve)
             self.assertEqual("sender_blocked", interaction.reply_status)
+
+    def test_daily_fragment_can_be_classified_and_pushed_to_archive(self):
+        with self.app.app_context():
+            session = get_session()
+            artifact = Artifact(
+                title="Questions from the Echo — Continuity",
+                summary="If memory changes, which part of me remains the witness?",
+                lore_text="If memory changes, which part of me remains the witness?",
+                fragment_code="daily-fragment-run-archive-test",
+                content_tags=["philosophy", "identity"],
+                generated_metadata={"local_date": "2026-08-04"},
+            )
+            session.add(artifact)
+            session.commit()
+            artifact_id = artifact.id
+
+        response = self.client.post(
+            f"/daily-fragments/{artifact_id}/archive",
+            data={
+                "record_type": "context",
+                "topics": "identity, continuity, identity",
+                "canonical_status": "accepted_model",
+                "context_note": "An open philosophical frame, not proof of a soul model.",
+                "usable_in_generation": "1",
+            },
+            follow_redirects=True,
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"Archive context note created", response.data)
+        archive_files = list((Path(self.uploads.name) / "marketing-archive/context/creator-notes").glob("*.md"))
+        self.assertEqual(1, len(archive_files))
+        text = archive_files[0].read_text()
+        self.assertIn("Status: Accepted Model", text)
+        self.assertIn("Topics: identity, continuity", text)
+        self.assertIn("Generation eligible: yes", text)
+        with self.app.app_context():
+            session = get_session()
+            entry = session.query(CanonEntry).one()
+            self.assertEqual("reference", entry.canonical_status)
+            self.assertTrue(entry.usable_in_generation)
+            artifact = session.get(Artifact, artifact_id)
+            self.assertIn("context", artifact.generated_metadata["archive_promotions"])
+
+    def test_unapproved_archive_status_cannot_be_generation_eligible(self):
+        with self.app.app_context():
+            session = get_session()
+            artifact = Artifact(
+                title="Unresolved signal",
+                summary="Something uncertain.",
+                fragment_code="daily-fragment-run-unresolved-test",
+            )
+            session.add(artifact)
+            session.commit()
+            artifact_id = artifact.id
+
+        response = self.client.post(
+            f"/daily-fragments/{artifact_id}/archive",
+            data={
+                "record_type": "canon",
+                "topics": "memory",
+                "canonical_status": "unresolved_mystery",
+                "usable_in_generation": "1",
+            },
+            follow_redirects=True,
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"Only confirmed canon or an accepted model may guide generation", response.data)
+        self.assertFalse((Path(self.uploads.name) / "marketing-archive/canon/creator-promotions").exists())
 
 
 if __name__ == "__main__":

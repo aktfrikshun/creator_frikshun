@@ -30,6 +30,11 @@ from .models import (
 )
 from .publishers import FacebookAdapter, InstagramAdapter, ThreadsAdapter, XAdapter, FanvueAdapter
 from .services.canon_importer import CanonImporter
+from .services.archive_promotion import (
+    ArchivePromotionService,
+    CANON_STATUSES,
+    RECORD_TYPES,
+)
 from .services.custom_post_curator import CUSTOM_POST_PLATFORMS, CustomPostCurator
 from .services.analytics_accounts import synchronize_account_registry
 from .services.account_analytics_runner import AccountAnalyticsRunner
@@ -1355,6 +1360,8 @@ def edit_daily_fragment(artifact_id):
         platforms=("facebook", "instagram", "threads", "x", "fanvue"),
         active_publications=active_publications,
         additional_images=list((artifact.generated_metadata or {}).get("additional_media") or []),
+        archive_record_types=RECORD_TYPES,
+        archive_canon_statuses=CANON_STATUSES,
     )
 
 
@@ -1422,6 +1429,49 @@ def update_daily_fragment(artifact_id):
     artifact.updated_at = datetime.now(timezone.utc)
     session.commit()
     flash("Post changes saved. Republish will create fresh platform posts for this same Creator OS entry.", "success")
+    return redirect(url_for("creator.edit_daily_fragment", artifact_id=artifact.id))
+
+
+@bp.post("/daily-fragments/<int:artifact_id>/archive")
+def promote_daily_fragment_to_archive(artifact_id):
+    session = get_session()
+    artifact = daily_fragment_or_404(session, artifact_id)
+    record_type = request.form.get("record_type", "").strip()
+    canonical_status = request.form.get("canonical_status", "").strip()
+    topics = request.form.get("topics", "").strip()
+    context_note = request.form.get("context_note", "").strip()
+    usable_in_generation = request.form.get("usable_in_generation") == "1"
+    root = current_app.config.get("CHLOE_MARKETING_ARCHIVE_ROOT")
+    service = ArchivePromotionService(session, root=root) if root else ArchivePromotionService(session)
+    try:
+        result = service.promote(
+            artifact,
+            record_type=record_type,
+            topics=topics,
+            canonical_status=canonical_status,
+            context_note=context_note,
+            usable_in_generation=usable_in_generation,
+        )
+    except (OSError, ValueError) as error:
+        session.rollback()
+        flash(f"Archive push failed: {error}", "error")
+        return redirect(url_for("creator.edit_daily_fragment", artifact_id=artifact.id))
+
+    metadata = dict(artifact.generated_metadata or {})
+    promotions = dict(metadata.get("archive_promotions") or {})
+    promotions[record_type] = {
+        "source_path": str(result.path),
+        "topics": ArchivePromotionService.clean_topics(topics),
+        "canonical_status": canonical_status,
+        "usable_in_generation": usable_in_generation,
+        "promoted_at": datetime.now(timezone.utc).isoformat(),
+    }
+    metadata["archive_promotions"] = promotions
+    artifact.generated_metadata = metadata
+    artifact.updated_at = datetime.now(timezone.utc)
+    session.commit()
+    verb = "created" if result.created else "updated"
+    flash(f"Archive {RECORD_TYPES[record_type][0].lower()} {verb}: {result.path.name}", "success")
     return redirect(url_for("creator.edit_daily_fragment", artifact_id=artifact.id))
 
 
