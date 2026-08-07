@@ -364,6 +364,10 @@
                   {% endfor %}
                 </div>
 
+                <div class="post-actions">
+                  <a class="action" href="{{ url_for('creator.categorize_post', artifact_id=post.id) }}">Categorize</a>
+                </div>
+
                 {% if post.generated_metadata.get('workflow') == 'custom_post_v1' %}
                   <div class="post-actions">
                     <a class="action strong" href="{{ url_for('creator.review_custom_post', artifact_id=post.id) }}">Review &amp; publish</a>

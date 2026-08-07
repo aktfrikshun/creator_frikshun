@@ -1360,8 +1360,6 @@ def edit_daily_fragment(artifact_id):
         platforms=("facebook", "instagram", "threads", "x", "fanvue"),
         active_publications=active_publications,
         additional_images=list((artifact.generated_metadata or {}).get("additional_media") or []),
-        archive_record_types=RECORD_TYPES,
-        archive_canon_statuses=CANON_STATUSES,
     )
 
 
@@ -1432,15 +1430,42 @@ def update_daily_fragment(artifact_id):
     return redirect(url_for("creator.edit_daily_fragment", artifact_id=artifact.id))
 
 
-@bp.post("/daily-fragments/<int:artifact_id>/archive")
-def promote_daily_fragment_to_archive(artifact_id):
+@bp.get("/posts/<int:artifact_id>/categorize")
+def categorize_post(artifact_id):
     session = get_session()
-    artifact = daily_fragment_or_404(session, artifact_id)
+    artifact = session.get(Artifact, artifact_id)
+    if artifact is None:
+        abort(404)
+    active_publications = [
+        publication
+        for draft in artifact.post_drafts
+        for publication in draft.publications
+        if publication.status == "published" and publication.external_post_id
+    ]
+    return render_template(
+        "post_categorization.html",
+        artifact=artifact,
+        archive_record_types=RECORD_TYPES,
+        archive_canon_statuses=CANON_STATUSES,
+        active_publications=active_publications,
+    )
+
+
+@bp.post("/posts/<int:artifact_id>/categorize")
+def promote_post_to_archive(artifact_id):
+    session = get_session()
+    artifact = session.get(Artifact, artifact_id)
+    if artifact is None:
+        abort(404)
     record_type = request.form.get("record_type", "").strip()
     canonical_status = request.form.get("canonical_status", "").strip()
     topics = request.form.get("topics", "").strip()
     context_note = request.form.get("context_note", "").strip()
     usable_in_generation = request.form.get("usable_in_generation") == "1"
+    usable_in_generation = bool(
+        usable_in_generation
+        and canonical_status in {"confirmed_canon", "accepted_model"}
+    )
     root = current_app.config.get("CHLOE_MARKETING_ARCHIVE_ROOT")
     service = ArchivePromotionService(session, root=root) if root else ArchivePromotionService(session)
     try:
@@ -1455,7 +1480,7 @@ def promote_daily_fragment_to_archive(artifact_id):
     except (OSError, ValueError) as error:
         session.rollback()
         flash(f"Archive push failed: {error}", "error")
-        return redirect(url_for("creator.edit_daily_fragment", artifact_id=artifact.id))
+        return redirect(url_for("creator.categorize_post", artifact_id=artifact.id))
 
     metadata = dict(artifact.generated_metadata or {})
     promotions = dict(metadata.get("archive_promotions") or {})
@@ -1472,7 +1497,7 @@ def promote_daily_fragment_to_archive(artifact_id):
     session.commit()
     verb = "created" if result.created else "updated"
     flash(f"Archive {RECORD_TYPES[record_type][0].lower()} {verb}: {result.path.name}", "success")
-    return redirect(url_for("creator.edit_daily_fragment", artifact_id=artifact.id))
+    return redirect(url_for("creator.categorize_post", artifact_id=artifact.id))
 
 
 @bp.post("/daily-fragments/<int:artifact_id>/regenerate-image")

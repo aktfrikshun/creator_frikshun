@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Categorize {{ artifact.title }} · Creator OS</title>
+    <style>
+      :root { --ink:#302925; --muted:#756b64; --line:#ded5cc; --paper:#f5f0e9; --surface:#fffdf9; --accent:#9e2f3d; --danger:#7f2431; --success:#2f6950; }
+      * { box-sizing:border-box; }
+      body { margin:0; color:var(--ink); background:var(--paper); font:15px/1.5 Inter,ui-sans-serif,system-ui,sans-serif; }
+      .shell { width:min(100% - 32px,900px); margin:0 auto; padding:34px 0 70px; }
+      a { color:inherit; }
+      .top { display:flex; justify-content:space-between; gap:20px; align-items:start; margin-bottom:24px; }
+      h1 { margin:5px 0 6px; font:500 clamp(30px,5vw,48px)/1.05 Georgia,serif; }
+      h2 { margin-top:0; }
+      .eyebrow { color:var(--accent); font-size:12px; font-weight:800; letter-spacing:.14em; text-transform:uppercase; }
+      .muted,.micro { color:var(--muted); }
+      .micro { font-size:12px; }
+      .panel { margin-top:16px; padding:22px; border:1px solid var(--line); border-radius:18px; background:var(--surface); }
+      .flash { margin-bottom:16px; padding:13px 16px; border:1px solid #b9d3c5; border-radius:12px; color:var(--success); background:#eef7f1; }
+      .flash.error { color:var(--danger); border-color:#e1b5bc; background:#fff0f2; }
+      .status-row { display:flex; flex-wrap:wrap; gap:8px; margin:14px 0 0; }
+      .pill { display:inline-flex; padding:5px 9px; border-radius:999px; background:#eee7df; font-size:12px; font-weight:750; }
+      label { display:block; margin:15px 0 6px; font-weight:750; }
+      textarea,select,input[type=text] { width:100%; border:1px solid var(--line); border-radius:10px; padding:11px 12px; color:var(--ink); background:#fff; font:inherit; }
+      textarea { min-height:145px; resize:vertical; }
+      .actions { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-top:18px; }
+      button,.button { display:inline-flex; border:0; border-radius:10px; padding:10px 14px; color:#fff; background:var(--accent); font:inherit; font-weight:800; text-decoration:none; cursor:pointer; }
+      .button.secondary { color:var(--ink); background:#eee7df; }
+      .record { padding:14px 0; border-top:1px solid var(--line); }
+      .record:first-of-type { border-top:0; }
+      .path { overflow-wrap:anywhere; }
+      @media(max-width:650px) { .top { display:block; } .top .button { margin-top:15px; } }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <div class="top">
+        <div>
+          <div class="eyebrow">Content categorization</div>
+          <h1>{{ artifact.title }}</h1>
+          <p class="muted">Categorization is available independently of editing or publication state.</p>
+          <div class="status-row">
+            <span class="pill">Artifact · {{ artifact.canonical_status|replace('_', ' ')|title }}</span>
+            {% if artifact.archived %}<span class="pill">Archived</span>{% endif %}
+            {% if active_publications %}<span class="pill">Published · {{ active_publications|map(attribute='platform')|join(', ') }}</span>{% else %}<span class="pill">Not currently published</span>{% endif %}
+          </div>
+        </div>
+        <a class="button secondary" href="{{ url_for('creator.index') }}">Back to library</a>
+      </div>
+
+      {% for category,message in get_flashed_messages(with_categories=true) %}<div class="flash {{ category }}">{{ message }}</div>{% endfor %}
+
+      <section class="panel">
+        <h2>Classify this content</h2>
+        <p class="muted">Create or update a durable Markdown record in the Chloe marketing archive. Social state, public visibility, canonical status, and generation eligibility remain separate decisions.</p>
+        <form action="{{ url_for('creator.promote_post_to_archive', artifact_id=artifact.id) }}" method="post">
+          <label for="record_type">Record destination</label>
+          <select id="record_type" name="record_type" required>
+            <option value="">Choose a durable record</option>
+            {% for value,details in archive_record_types.items() %}<option value="{{ value }}">{{ details[0] }}</option>{% endfor %}
+          </select>
+
+          <label for="archive_topics">Topics</label>
+          <input id="archive_topics" name="topics" type="text" value="{{ artifact.content_tags|join(', ') }}" placeholder="identity, memory preservation — or — #Identity #MemoryPreservation" required>
+          <p class="micro">Use a comma-separated list of words or phrases, space-separated hashtags, or pasted-together hashtags. All three formats are normalized into separate topics.</p>
+
+          <label for="archive_canonical_status">Evidence / canon status</label>
+          <select id="archive_canonical_status" name="canonical_status" required>
+            {% for status in archive_canon_statuses|sort %}<option value="{{ status }}" {% if status == 'generated_artifact' %}selected{% endif %}>{{ status|replace('_', ' ')|title }}</option>{% endfor %}
+          </select>
+
+          <label for="context_note">Archivist context</label>
+          <textarea id="context_note" name="context_note" placeholder="What makes this durable, what remains uncertain, and how it relates to existing continuity."></textarea>
+
+          <label><input id="usable_in_generation" name="usable_in_generation" type="checkbox" value="1" disabled> Make available to future generation</label>
+          <p class="micro">Generation use is accepted only for Confirmed Canon or Accepted Model. Drafts, artifacts, contradictions, and mysteries remain excluded.</p>
+          <div class="actions"><button type="submit">Save and push to archive</button></div>
+        </form>
+      </section>
+
+      {% if artifact.generated_metadata.get('archive_promotions') %}
+        <section class="panel">
+          <h2>Existing classifications</h2>
+          {% for kind,promotion in artifact.generated_metadata.get('archive_promotions').items() %}
+            <div class="record">
+              <strong>{{ archive_record_types.get(kind, (kind,))[0] }}</strong>
+              <div class="micro">{{ promotion.get('canonical_status', '')|replace('_', ' ')|title }} · {{ promotion.get('topics', [])|join(', ') }} · Generation {{ 'enabled' if promotion.get('usable_in_generation') else 'disabled' }}</div>
+              <div class="micro path">{{ promotion.get('source_path', '') }}</div>
+            </div>
+          {% endfor %}
+        </section>
+      {% endif %}
+    </main>
+    <script>
+      const statusSelect = document.getElementById('archive_canonical_status');
+      const generationCheckbox = document.getElementById('usable_in_generation');
+      function syncGenerationEligibility() {
+        const eligible = ['confirmed_canon', 'accepted_model'].includes(statusSelect.value);
+        generationCheckbox.disabled = !eligible;
+        if (!eligible) generationCheckbox.checked = false;
+      }
+      statusSelect.addEventListener('change', syncGenerationEligibility);
+      syncGenerationEligibility();
+    </script>
+  </body>
+</html>

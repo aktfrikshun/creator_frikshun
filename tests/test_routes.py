@@ -1313,7 +1313,7 @@ class RoutesTest(unittest.TestCase):
             artifact_id = artifact.id
 
         response = self.client.post(
-            f"/daily-fragments/{artifact_id}/archive",
+            f"/posts/{artifact_id}/categorize",
             data={
                 "record_type": "context",
                 "topics": "identity, continuity, identity",
@@ -1340,7 +1340,40 @@ class RoutesTest(unittest.TestCase):
             artifact = session.get(Artifact, artifact_id)
             self.assertIn("context", artifact.generated_metadata["archive_promotions"])
 
-    def test_unapproved_archive_status_cannot_be_generation_eligible(self):
+    def test_published_post_has_independent_categorization_page(self):
+        with self.app.app_context():
+            session = get_session()
+            artifact = Artifact(
+                title="Published signal",
+                summary="A signal that is already live.",
+                content_tags=["lifestyle"],
+            )
+            draft = PostDraft(
+                artifact=artifact,
+                platform="facebook",
+                caption="Already published.",
+                status="published",
+            )
+            session.add(
+                PostPublication(
+                    post_draft=draft,
+                    platform="facebook",
+                    status="published",
+                    external_post_id="published-categorization-test",
+                )
+            )
+            session.commit()
+            artifact_id = artifact.id
+
+        library = self.client.get("/")
+        self.assertIn(f'/posts/{artifact_id}/categorize'.encode(), library.data)
+        response = self.client.get(f"/posts/{artifact_id}/categorize")
+        self.assertEqual(200, response.status_code)
+        self.assertIn(b"Content categorization", response.data)
+        self.assertIn(b"Published \xc2\xb7 facebook", response.data)
+        self.assertIn(b"Save and push to archive", response.data)
+
+    def test_unapproved_archive_status_is_automatically_excluded_from_generation(self):
         with self.app.app_context():
             session = get_session()
             artifact = Artifact(
@@ -1353,7 +1386,7 @@ class RoutesTest(unittest.TestCase):
             artifact_id = artifact.id
 
         response = self.client.post(
-            f"/daily-fragments/{artifact_id}/archive",
+            f"/posts/{artifact_id}/categorize",
             data={
                 "record_type": "canon",
                 "topics": "memory",
@@ -1364,8 +1397,35 @@ class RoutesTest(unittest.TestCase):
         )
 
         self.assertEqual(200, response.status_code)
-        self.assertIn(b"Only confirmed canon or an accepted model may guide generation", response.data)
-        self.assertFalse((Path(self.uploads.name) / "marketing-archive/canon/creator-promotions").exists())
+        self.assertIn(b"Archive canon proposal created", response.data)
+        archive_files = list((Path(self.uploads.name) / "marketing-archive/canon/creator-promotions").glob("*.md"))
+        self.assertEqual(1, len(archive_files))
+        self.assertIn("Generation eligible: no", archive_files[0].read_text())
+        with self.app.app_context():
+            entry = get_session().query(CanonEntry).one()
+            self.assertFalse(entry.usable_in_generation)
+
+    def test_archive_topics_accept_hashtag_separated_values(self):
+        from frikshun_creator.services.archive_promotion import ArchivePromotionService
+
+        self.assertEqual(
+            ["FrozenLake", "FineArtPhotography", "Ethereal"],
+            ArchivePromotionService.clean_topics(
+                "FrozenLake#FineArtPhotography#Ethereal"
+            ),
+        )
+        self.assertEqual(
+            ["FrozenLake", "FineArtPhotography", "MemoryPreservation"],
+            ArchivePromotionService.clean_topics(
+                "#FrozenLake #FineArtPhotography #MemoryPreservation"
+            ),
+        )
+        self.assertEqual(
+            ["frozen lake", "fine art photography", "memory preservation"],
+            ArchivePromotionService.clean_topics(
+                "frozen lake, fine art photography, memory preservation"
+            ),
+        )
 
 
 if __name__ == "__main__":

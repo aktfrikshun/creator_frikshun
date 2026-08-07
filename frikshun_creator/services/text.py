@@ -1,8 +1,15 @@
+import re
+
+
 def split_tags(value):
     if not value:
         return []
     if isinstance(value, list):
         return compact_tags(value)
+
+    value = str(value)
+    if value.count("#") > 1:
+        return compact_tags(re.findall(r"#([^#,\s]+)", value))
     return compact_tags(part.strip() for part in value.split(","))
 
 

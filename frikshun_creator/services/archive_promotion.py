@@ -69,8 +69,10 @@ class ArchivePromotionService:
         topics = self.clean_topics(topics)
         if not topics:
             raise ValueError("Add at least one topic before pushing to the archive.")
-        if usable_in_generation and canonical_status not in {"confirmed_canon", "accepted_model"}:
-            raise ValueError("Only confirmed canon or an accepted model may guide generation.")
+        usable_in_generation = bool(
+            usable_in_generation
+            and canonical_status in {"confirmed_canon", "accepted_model"}
+        )
 
         local_date = str((artifact.generated_metadata or {}).get("local_date") or "").strip()
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", local_date):
@@ -165,7 +167,7 @@ class ArchivePromotionService:
     @staticmethod
     def clean_topics(value):
         if isinstance(value, str):
-            values = value.split(",")
+            values = re.split(r"\s*,\s*|#+", value)
         else:
             values = value or []
         cleaned = []

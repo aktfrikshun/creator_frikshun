@@ -100,35 +100,6 @@
       </form>
 
       <section class="panel">
-        <h2>Archive classification</h2>
-        <p class="muted">Classify the durable record separately from the social post. Pushing creates or updates a Markdown record in the Chloe marketing archive; it never changes canon silently.</p>
-        <form action="{{ url_for('creator.promote_daily_fragment_to_archive', artifact_id=artifact.id) }}" method="post">
-          <label for="record_type">Record destination</label>
-          <select id="record_type" name="record_type" required>
-            <option value="">Choose a durable record</option>
-            {% for value, details in archive_record_types.items() %}<option value="{{ value }}">{{ details[0] }}</option>{% endfor %}
-          </select>
-          <label for="archive_topics">Topics</label>
-          <input id="archive_topics" name="topics" type="text" value="{{ artifact.content_tags|join(', ') }}" placeholder="identity, memory, music" required>
-          <label for="archive_canonical_status">Evidence / canon status</label>
-          <select id="archive_canonical_status" name="canonical_status" required>
-            {% for status in archive_canon_statuses|sort %}<option value="{{ status }}" {% if status == 'generated_artifact' %}selected{% endif %}>{{ status|replace('_', ' ')|title }}</option>{% endfor %}
-          </select>
-          <label for="context_note">Archivist context</label>
-          <textarea id="context_note" name="context_note" placeholder="What makes this durable, what remains uncertain, and how it relates to existing continuity."></textarea>
-          <label><input name="usable_in_generation" type="checkbox" value="1"> Make available to future generation</label>
-          <p class="micro">Generation use is accepted only for Confirmed Canon or Accepted Model. Drafts, artifacts, contradictions, and mysteries remain excluded.</p>
-          <div class="actions"><button type="submit">Push to archive</button></div>
-        </form>
-        {% if artifact.generated_metadata.get('archive_promotions') %}
-          <h3>Durable records</h3>
-          {% for kind, promotion in artifact.generated_metadata.get('archive_promotions').items() %}
-            <p class="micro"><strong>{{ archive_record_types.get(kind, (kind,))[0] }}</strong> · {{ promotion.get('canonical_status', '')|replace('_', ' ') }} · {{ promotion.get('topics', [])|join(', ') }}<br>{{ promotion.get('source_path', '') }}</p>
-          {% endfor %}
-        {% endif %}
-      </section>
-
-      <section class="panel">
         <h2>Regenerate</h2>
         <p class="muted">Generate a new primary image from the exact original prompt. The current image moves into history.</p>
         <div class="actions">
